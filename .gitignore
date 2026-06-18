@@ -1,0 +1,15 @@
+build/
+out/
+.venv/
+uv.lock
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+*.user
+*.weights
+*.pt
+gpu_training.tsv
+.vs/
+__pycache__/
