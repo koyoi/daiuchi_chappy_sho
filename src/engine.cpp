@@ -24,7 +24,6 @@ namespace shogi {
 namespace {
 
 constexpr int MateScore = 29000;
-constexpr int MateSearchDepth = 3;
 constexpr int QuiescenceDepth = 4;
 constexpr int ExactScore = 0;
 constexpr int LowerBound = 1;
@@ -100,7 +99,13 @@ Move LearningEngine::chooseMove(const Board& board) {
 }
 
 Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits) {
+    return chooseMove(board, limits, InfoCallback{});
+}
+
+Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, const InfoCallback& infoCallback) {
+    const auto searchStart = std::chrono::steady_clock::now();
     stopped_.store(false);
+    nodes_.store(0);
     {
         std::lock_guard<std::mutex> lock(transpositionMutex_);
         transposition_.clear();
@@ -111,46 +116,69 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits) 
 
     const auto legal = generateLegalMoves(board, true);
     if (legal.empty()) {
+        SearchInfo info;
+        info.depth = 0;
+        info.nodes = nodes_.load();
+        info.timeMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - searchStart).count());
+        setLastSearchInfo(info);
         return Move{};
     }
 
     Move gpuMove;
     if (chooseMoveByGpu(board, legal, gpuMove)) {
+        SearchInfo info;
+        info.depth = 1;
+        info.nodes = static_cast<std::uint64_t>(legal.size());
+        info.timeMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - searchStart).count());
+        info.bestMove = gpuMove;
+        info.hasBestMove = true;
+        setLastSearchInfo(info);
         return gpuMove;
     }
 
     const Color rootSide = board.side;
-    std::vector<Move> mateMoves;
-    for (const Move& move : orderMoves(board, legal, rootSide)) {
-        if (shouldStop()) {
-            break;
-        }
-        Board next = board;
-        applyMove(next, move);
-        if (canForceMate(next, MateSearchDepth - 1, rootSide)) {
-            mateMoves.push_back(move);
-        }
-    }
-    if (!mateMoves.empty()) {
-        std::uniform_int_distribution<std::size_t> dist(0, mateMoves.size() - 1);
-        return mateMoves[dist(rng_)];
-    }
-
+    const std::vector<Move> orderedMoves = orderMoves(board, legal, rootSide);
+    int completedDepth = 0;
     int bestScore = std::numeric_limits<int>::min();
     std::vector<Move> bestMoves;
-    const std::vector<Move> orderedMoves = orderMoves(board, legal, rootSide);
-    const std::vector<int> scores = scoreRootMovesParallel(board, orderedMoves, rootSide);
-    for (std::size_t i = 0; i < orderedMoves.size(); ++i) {
-        const int score = scores[i];
-        if (score == std::numeric_limits<int>::min()) {
-            continue;
+    const int maxDepth = depthLimit();
+    for (int depth = 1; depth <= maxDepth && !shouldStop(); ++depth) {
+        const std::uint64_t nodesBeforeDepth = nodes_.load();
+        const std::vector<int> scores = scoreRootMovesParallel(board, orderedMoves, rootSide, depth, searchStart, infoCallback);
+        if (shouldStop() && nodes_.load() == nodesBeforeDepth) {
+            break;
         }
-        if (score > bestScore) {
-            bestScore = score;
-            bestMoves.clear();
-            bestMoves.push_back(orderedMoves[i]);
-        } else if (score == bestScore) {
-            bestMoves.push_back(orderedMoves[i]);
+
+        int depthBestScore = std::numeric_limits<int>::min();
+        std::vector<Move> depthBestMoves;
+        for (std::size_t i = 0; i < orderedMoves.size(); ++i) {
+            const int score = scores[i];
+            if (score == std::numeric_limits<int>::min()) {
+                continue;
+            }
+            if (score > depthBestScore) {
+                depthBestScore = score;
+                depthBestMoves.clear();
+                depthBestMoves.push_back(orderedMoves[i]);
+            } else if (score == depthBestScore) {
+                depthBestMoves.push_back(orderedMoves[i]);
+            }
+        }
+        if (!depthBestMoves.empty()) {
+            completedDepth = depth;
+            bestScore = depthBestScore;
+            bestMoves = depthBestMoves;
+            SearchInfo info;
+            info.depth = completedDepth;
+            info.scoreCp = std::clamp(bestScore, -MateScore, MateScore);
+            info.nodes = nodes_.load();
+            info.timeMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - searchStart).count());
+            info.bestMove = bestMoves.front();
+            info.hasBestMove = true;
+            setLastSearchInfo(info);
+            if (infoCallback) {
+                infoCallback(info);
+            }
         }
     }
 
@@ -158,7 +186,16 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits) 
         bestMoves.push_back(legal.front());
     }
     std::uniform_int_distribution<std::size_t> dist(0, bestMoves.size() - 1);
-    return bestMoves[dist(rng_)];
+    const Move selected = bestMoves[dist(rng_)];
+    SearchInfo info;
+    info.depth = completedDepth;
+    info.scoreCp = bestScore == std::numeric_limits<int>::min() ? 0 : std::clamp(bestScore, -MateScore, MateScore);
+    info.nodes = nodes_.load();
+    info.timeMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - searchStart).count());
+    info.bestMove = selected;
+    info.hasBestMove = true;
+    setLastSearchInfo(info);
+    return selected;
 }
 
 void LearningEngine::recordMove(const Board& before, const Move& move, bool engineMove) {
@@ -179,7 +216,7 @@ void LearningEngine::setLearningEnabled(bool enabled) {
 }
 
 void LearningEngine::setSearchDepth(int depth) {
-    searchDepth_ = std::clamp(depth, 1, 6);
+    searchDepth_ = std::clamp(depth, 0, 128);
 }
 
 void LearningEngine::setMaxMoveTimeMs(int milliseconds) {
@@ -235,6 +272,11 @@ void LearningEngine::loadWeights() {
     learner_.loadWeights();
 }
 
+SearchInfo LearningEngine::lastSearchInfo() const {
+    std::lock_guard<std::mutex> lock(lastSearchInfoMutex_);
+    return lastSearchInfo_;
+}
+
 bool LearningEngine::chooseMoveByGpu(const Board& board, const std::vector<Move>& legal, Move& selected) {
     std::vector<FeatureVector> features;
     features.reserve(legal.size());
@@ -269,6 +311,7 @@ bool LearningEngine::chooseMoveByGpu(const Board& board, const std::vector<Move>
 }
 
 int LearningEngine::search(Board board, int depth, int alpha, int beta, Color rootSide) const {
+    nodes_.fetch_add(1);
     if (shouldStop()) {
         return evaluator_.evaluate(board, rootSide);
     }
@@ -351,6 +394,7 @@ int LearningEngine::search(Board board, int depth, int alpha, int beta, Color ro
 }
 
 int LearningEngine::quiescence(Board board, int depth, int alpha, int beta, Color rootSide) const {
+    nodes_.fetch_add(1);
     if (shouldStop()) {
         return evaluator_.evaluate(board, rootSide);
     }
@@ -412,6 +456,7 @@ int LearningEngine::quiescence(Board board, int depth, int alpha, int beta, Colo
 }
 
 bool LearningEngine::canForceMate(Board board, int depth, Color attacker) const {
+    nodes_.fetch_add(1);
     if (shouldStop()) {
         return false;
     }
@@ -456,11 +501,52 @@ bool LearningEngine::isTacticalMove(const Board& board, const Move& move) const 
     return isKingAttacked(next, next.side);
 }
 
-std::vector<int> LearningEngine::scoreRootMovesParallel(const Board& board, const std::vector<Move>& orderedMoves, Color rootSide) const {
+std::vector<int> LearningEngine::scoreRootMovesParallel(
+    const Board& board,
+    const std::vector<Move>& orderedMoves,
+    Color rootSide,
+    int depth,
+    const std::chrono::steady_clock::time_point& searchStart,
+    const InfoCallback& infoCallback) const {
     std::vector<int> scores(orderedMoves.size(), std::numeric_limits<int>::min());
     if (orderedMoves.empty()) {
         return scores;
     }
+
+    std::mutex bestMutex;
+    std::mutex emitMutex;
+    int bestScore = std::numeric_limits<int>::min();
+    Move bestMove;
+    bool hasBestMove = false;
+    auto lastEmit = searchStart - std::chrono::milliseconds(1000);
+
+    auto publish = [&](std::size_t index, int score, bool force) {
+        SearchInfo info;
+        bool shouldEmit = false;
+        {
+            std::lock_guard<std::mutex> lock(bestMutex);
+            if (!hasBestMove || score > bestScore) {
+                bestScore = score;
+                bestMove = orderedMoves[index];
+                hasBestMove = true;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (force || now - lastEmit >= std::chrono::milliseconds(250)) {
+                lastEmit = now;
+                info.depth = depth;
+                info.scoreCp = std::clamp(bestScore, -MateScore, MateScore);
+                info.nodes = nodes_.load();
+                info.timeMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - searchStart).count());
+                info.bestMove = bestMove;
+                info.hasBestMove = hasBestMove;
+                shouldEmit = hasBestMove;
+            }
+        }
+        if (shouldEmit && infoCallback) {
+            std::lock_guard<std::mutex> emitLock(emitMutex);
+            infoCallback(info);
+        }
+    };
 
     const int workerCount = std::min<int>(std::max(1, threads_), static_cast<int>(orderedMoves.size()));
     if (workerCount <= 1) {
@@ -470,7 +556,8 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(const Board& board, cons
             }
             Board next = board;
             applyMove(next, orderedMoves[i]);
-            scores[i] = search(next, searchDepth_ - 1, -MateScore, MateScore, rootSide);
+            scores[i] = search(next, depth - 1, -MateScore, MateScore, rootSide);
+            publish(i, scores[i], i + 1 == orderedMoves.size());
         }
         return scores;
     }
@@ -487,7 +574,8 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(const Board& board, cons
                 }
                 Board next = board;
                 applyMove(next, orderedMoves[index]);
-                scores[index] = search(next, searchDepth_ - 1, -MateScore, MateScore, rootSide);
+                scores[index] = search(next, depth - 1, -MateScore, MateScore, rootSide);
+                publish(index, scores[index], index + 1 == orderedMoves.size());
             }
         });
     }
@@ -556,6 +644,15 @@ std::uint64_t LearningEngine::boardHash(const Board& board, Color rootSide) cons
         mix(static_cast<std::uint64_t>(board.whiteHand[i] + 11 * i));
     }
     return hash;
+}
+
+void LearningEngine::setLastSearchInfo(const SearchInfo& info) const {
+    std::lock_guard<std::mutex> lock(lastSearchInfoMutex_);
+    lastSearchInfo_ = info;
+}
+
+int LearningEngine::depthLimit() const {
+    return searchDepth_ > 0 ? searchDepth_ : 128;
 }
 
 } // namespace shogi

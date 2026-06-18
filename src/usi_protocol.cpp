@@ -192,6 +192,24 @@ SearchLimits parseSearchLimits(const std::vector<std::string>& words, Color side
     return SearchLimits{std::clamp(budget, 50, 10000)};
 }
 
+void printSearchInfo(const SearchInfo& info) {
+    if (!info.hasBestMove) {
+        return;
+    }
+    const std::uint64_t nps = info.timeMs > 0 ? info.nodes * 1000ull / static_cast<std::uint64_t>(info.timeMs) : info.nodes;
+    std::cout << "info depth " << info.depth
+              << " score cp " << info.scoreCp
+              << " nodes " << info.nodes
+              << " nps " << nps
+              << " time " << info.timeMs
+              << " pv " << toUsi(info.bestMove)
+              << std::endl;
+}
+
+void printSearchInfo(const LearningEngine& engine) {
+    printSearchInfo(engine.lastSearchInfo());
+}
+
 } // namespace
 
 void usiLoop() {
@@ -212,7 +230,7 @@ void usiLoop() {
             std::cout << "id name LearningShogiEngine" << std::endl;
             std::cout << "id author OpenAI Codex" << std::endl;
             std::cout << "option name Learning type check default true" << std::endl;
-            std::cout << "option name SearchDepth type spin default 2 min 1 max 6" << std::endl;
+            std::cout << "option name SearchDepth type spin default 0 min 0 max 128" << std::endl;
             std::cout << "option name MaxMoveTimeMs type spin default 1000 min 50 max 600000" << std::endl;
             std::cout << "option name Threads type spin default " << engine.threadCount() << " min 1 max 256" << std::endl;
             std::cout << "option name HeavyEvaluation type check default true" << std::endl;
@@ -245,10 +263,13 @@ void usiLoop() {
                 engineSide = board.side;
                 engineSideKnown = true;
             }
-            const Move move = engine.chooseMove(board, parseSearchLimits(words, board.side));
+            const Move move = engine.chooseMove(board, parseSearchLimits(words, board.side), [](const SearchInfo& info) {
+                printSearchInfo(info);
+            });
             if (move.to < 0) {
                 std::cout << "bestmove resign" << std::endl;
             } else {
+                printSearchInfo(engine);
                 engine.recordMove(board, move, true);
                 recordedMoves.push_back(toUsi(move));
                 std::cout << "bestmove " << toUsi(move) << std::endl;

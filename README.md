@@ -57,7 +57,7 @@ quit
 - `usi`
 - `isready`
 - `setoption name Learning value true|false`
-- `setoption name SearchDepth value 1..6`
+- `setoption name SearchDepth value 0..128`
 - `setoption name MaxMoveTimeMs value 50..600000`
 - `setoption name Threads value 1..256`
 - `setoption name HeavyEvaluation value true|false`
@@ -182,7 +182,7 @@ CSA は標準入出力で動く簡易モードです。
 
 ## 速度設定
 
-`SearchDepth` は読みの深さ、`MaxMoveTimeMs` はGUIから持ち時間指定が来ない場合の1手あたり上限です。ShogiGUIから `go btime ... wtime ... byoyomi ...` が来る場合は、その持ち時間から自動で考慮時間を決めます。
+`SearchDepth` は読みの上限です。`0` の場合は、持ち時間内で可能な限り反復深化します。`MaxMoveTimeMs` はGUIから持ち時間指定が来ない場合の1手あたり上限です。ShogiGUIから `go btime ... wtime ... byoyomi ...` が来る場合は、その持ち時間から自動で考慮時間を決めます。
 
 `Threads` はCPU探索スレッド数です。デフォルトはWindowsでは物理コア数を検出し、`物理コア数 - 2` にします。検出できない環境では論理スレッド数から控えめに推定します。並列化はルート合法手ごとの探索に対して行います。
 
