@@ -204,8 +204,15 @@ void printSearchInfo(const SearchInfo& info) {
               << " nodes " << info.nodes
               << " nps " << nps
               << " time " << info.timeMs
-              << " pv " << toUsi(info.bestMove)
-              << std::endl;
+              << " pv";
+    if (!info.pv.empty()) {
+        for (const Move& m : info.pv) {
+            std::cout << " " << toUsi(m);
+        }
+    } else {
+        std::cout << " " << toUsi(info.bestMove);
+    }
+    std::cout << std::endl;
 }
 
 void printSearchInfo(const LearningEngine& engine) {

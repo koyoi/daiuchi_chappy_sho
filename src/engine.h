@@ -28,6 +28,7 @@ struct SearchInfo {
     int timeMs = 0;
     Move bestMove{};
     bool hasBestMove = false;
+    std::vector<Move> pv;
 };
 
 using InfoCallback = std::function<void(const SearchInfo&)>;
@@ -63,6 +64,7 @@ public:
 
 private:
     int search(Board board, int depth, int alpha, int beta, Color rootSide) const;
+    std::vector<Move> extractPV(Board board, Color rootSide, int maxDepth) const;
     int quiescence(Board board, int depth, int alpha, int beta, Color rootSide) const;
     bool canForceMate(Board board, int depth, Color attacker) const;
     bool isTacticalMove(const Board& board, const Move& move) const;
@@ -88,6 +90,7 @@ private:
         int score = 0;
         std::uint8_t flag = 0;
         std::uint8_t generation = 0;
+        Move bestMove{};
     };
 
     static constexpr int TTBits = 20;

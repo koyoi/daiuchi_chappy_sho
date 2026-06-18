@@ -342,6 +342,12 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
             info.timeMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - searchStart).count());
             info.bestMove = bestMoves.front();
             info.hasBestMove = true;
+            // PV構築: ルート最善手 + TTから後続手順を復元
+            info.pv.push_back(bestMoves.front());
+            Board pvBoard = board;
+            applyMove(pvBoard, bestMoves.front());
+            auto pvTail = extractPV(pvBoard, rootSide, completedDepth);
+            info.pv.insert(info.pv.end(), pvTail.begin(), pvTail.end());
             setLastSearchInfo(info);
             if (infoCallback) {
                 infoCallback(info);
@@ -536,10 +542,15 @@ int LearningEngine::search(Board board, int depth, int alpha, int beta, Color ro
     // 自分の手番: スコアを最大化 (max node)
     if (board.side == rootSide) {
         int best = std::numeric_limits<int>::min();
+        Move bestMoveLocal{};
         for (const Move& move : orderMoves(board, legal, rootSide)) {
             Board next = board;
             applyMove(next, move);
-            best = std::max(best, search(next, depth - 1, alpha, beta, rootSide));
+            const int val = search(next, depth - 1, alpha, beta, rootSide);
+            if (val > best) {
+                best = val;
+                bestMoveLocal = move;
+            }
             alpha = std::max(alpha, best);
             if (alpha >= beta) {
                 break; // βカット: これ以上探索しても相手が許さない
@@ -553,6 +564,7 @@ int LearningEngine::search(Board board, int depth, int alpha, int beta, Color ro
                 slot.key = key;
                 slot.depth = depth;
                 slot.score = best;
+                slot.bestMove = bestMoveLocal;
                 slot.flag = best <= alphaOriginal ? UpperBound : (best >= betaOriginal ? LowerBound : ExactScore);
                 slot.generation = ttGeneration_;
             }
@@ -562,10 +574,15 @@ int LearningEngine::search(Board board, int depth, int alpha, int beta, Color ro
 
     // 相手の手番: スコアを最小化 (min node)
     int best = std::numeric_limits<int>::max();
+    Move bestMoveLocal{};
     for (const Move& move : orderMoves(board, legal, rootSide)) {
         Board next = board;
         applyMove(next, move);
-        best = std::min(best, search(next, depth - 1, alpha, beta, rootSide));
+        const int val = search(next, depth - 1, alpha, beta, rootSide);
+        if (val < best) {
+            best = val;
+            bestMoveLocal = move;
+        }
         beta = std::min(beta, best);
         if (alpha >= beta) {
             break; // αカット: これ以上探索しても自分に有利にならない
@@ -578,6 +595,7 @@ int LearningEngine::search(Board board, int depth, int alpha, int beta, Color ro
             slot.key = key;
             slot.depth = depth;
             slot.score = best;
+            slot.bestMove = bestMoveLocal;
             slot.flag = best <= alphaOriginal ? UpperBound : (best >= betaOriginal ? LowerBound : ExactScore);
             slot.generation = ttGeneration_;
         }
@@ -873,6 +891,30 @@ std::uint64_t LearningEngine::boardHash(const Board& board, Color rootSide) cons
 void LearningEngine::setLastSearchInfo(const SearchInfo& info) const {
     std::lock_guard<std::mutex> lock(lastSearchInfoMutex_);
     lastSearchInfo_ = info;
+}
+
+std::vector<Move> LearningEngine::extractPV(Board board, Color rootSide, int maxDepth) const {
+    std::vector<Move> pv;
+    for (int i = 0; i < maxDepth; ++i) {
+        const std::uint64_t key = boardHash(board, rootSide);
+        const int ttIndex = static_cast<int>(key & TTMask);
+        const int lockIndex = static_cast<int>((key >> TTBits) % LockCount);
+        Move ttMove;
+        {
+            std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
+            const TranspositionEntry& slot = transposition_[ttIndex];
+            if (slot.key != key || slot.generation != ttGeneration_) {
+                break;
+            }
+            ttMove = slot.bestMove;
+        }
+        if (ttMove.to < 0) {
+            break;
+        }
+        pv.push_back(ttMove);
+        applyMove(board, ttMove);
+    }
+    return pv;
 }
 
 int LearningEngine::depthLimit() const {
