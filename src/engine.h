@@ -48,6 +48,7 @@ public:
     void setSearchDepth(int depth);
     void setMaxMoveTimeMs(int milliseconds);
     void setHeavyEvaluation(bool enabled);
+    void setOpeningSafety(bool enabled);
     void setThreads(int threads);
     int threadCount() const;
     void setWeightsPath(const std::string& path);
@@ -70,6 +71,7 @@ private:
     std::vector<int> scoreRootMovesParallel(
         const Board& board,
         const std::vector<Move>& orderedMoves,
+        const std::vector<int>& openingPenalties,
         Color rootSide,
         int depth,
         const std::chrono::steady_clock::time_point& searchStart,
@@ -101,6 +103,7 @@ private:
     int threads_ = 1;
     std::mt19937 rng_;
     int searchDepth_ = 0;
+    bool openingSafety_ = true;
 };
 
 } // namespace shogi

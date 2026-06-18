@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <mutex>
@@ -24,7 +25,7 @@ namespace shogi {
 namespace {
 
 constexpr int MateScore = 29000;
-constexpr int QuiescenceDepth = 4;
+constexpr int QuiescenceDepth = 2;
 constexpr int ExactScore = 0;
 constexpr int LowerBound = 1;
 constexpr int UpperBound = 2;
@@ -85,6 +86,139 @@ int defaultThreadCount() {
     return std::max(1, cores - 2);
 }
 
+int chebyshevDistance(int left, int right) {
+    return std::max(std::abs(fileOf(left) - fileOf(right)), std::abs(rankOf(left) - rankOf(right)));
+}
+
+int openingSafetyScale(int moveNumber) {
+    if (moveNumber >= 56) {
+        return 0;
+    }
+    if (moveNumber <= 24) {
+        return 100;
+    }
+    return std::max(0, (56 - moveNumber) * 100 / 32);
+}
+
+int promotionGain(PieceType type) {
+    if (!canPromote(type)) {
+        return 0;
+    }
+    return std::max(0, pieceValue(promote(type)) - pieceValue(type));
+}
+
+int vulnerablePiecePenalty(const Board& board, Color side) {
+    int penalty = 0;
+    const Color enemy = opposite(side);
+    for (int square = 0; square < BoardSize; ++square) {
+        const int piece = board.squares[square];
+        if (piece == 0 || colorOf(piece) != side || typeOf(piece) == King) {
+            continue;
+        }
+        const PieceType type = typeOf(piece);
+        const int value = pieceValue(type);
+        const int attackers = countAttackers(board, square, enemy);
+        if (attackers <= 0) {
+            continue;
+        }
+        const int defenders = countAttackers(board, square, side);
+        if (defenders == 0) {
+            penalty += value / 2;
+            if (type == Bishop || type == Rook || type == Horse || type == Dragon) {
+                penalty += value / 3;
+            }
+        } else if (attackers > defenders) {
+            penalty += value / 4;
+        }
+    }
+    return penalty;
+}
+
+int kingExposurePenalty(const Board& board, Color side) {
+    const int king = findKing(board, side);
+    if (king < 0) {
+        return MateScore / 2;
+    }
+    const Color enemy = opposite(side);
+    int penalty = 0;
+    for (int df = -1; df <= 1; ++df) {
+        for (int dr = -1; dr <= 1; ++dr) {
+            const int file = fileOf(king) + df;
+            const int rank = rankOf(king) + dr;
+            if (!inside(file, rank)) {
+                continue;
+            }
+            const int square = idx(file, rank);
+            const int attackers = countAttackers(board, square, enemy);
+            if (attackers > 0) {
+                penalty += df == 0 && dr == 0 ? 420 * attackers : 95 * attackers;
+            }
+        }
+    }
+    return penalty;
+}
+
+int opponentImmediateThreatScore(const Board& board, Color targetSide) {
+    if (board.side == targetSide) {
+        return 0;
+    }
+    const int king = findKing(board, targetSide);
+    const auto replies = generateLegalMoves(board, true);
+    int best = 0;
+    int accumulated = 0;
+    int checks = 0;
+    for (const Move& reply : replies) {
+        int score = 0;
+        if (!reply.isDrop() && board.squares[reply.to] != 0 && colorOf(board.squares[reply.to]) == targetSide) {
+            const PieceType captured = typeOf(board.squares[reply.to]);
+            score += pieceValue(captured);
+            if (captured == Bishop || captured == Rook || captured == Horse || captured == Dragon) {
+                score += 260;
+            }
+        }
+        if (reply.promote) {
+            score += 260 + promotionGain(reply.piece);
+        }
+        if (king >= 0) {
+            const int distance = chebyshevDistance(reply.to, king);
+            if (reply.isDrop() && distance <= 2) {
+                score += pieceValue(reply.drop) / 2 + (distance <= 1 ? 180 : 70);
+            } else if (distance <= 1 && !reply.isDrop()) {
+                score += 80;
+            }
+        }
+
+        Board next = board;
+        applyMove(next, reply);
+        if (isKingAttacked(next, targetSide)) {
+            score += 1100;
+            ++checks;
+            if (generateLegalMoves(next, true).empty()) {
+                return MateScore;
+            }
+        }
+
+        if (score > 0) {
+            best = std::max(best, score);
+            accumulated += std::min(score, 1400) / 5;
+        }
+    }
+    return best + accumulated + checks * 160;
+}
+
+int openingTrapPenalty(const Board& before, const Move& move, Color side) {
+    const int scale = openingSafetyScale(before.moveNumber);
+    if (scale <= 0) {
+        return 0;
+    }
+    Board next = before;
+    applyMove(next, move);
+    const int threat = opponentImmediateThreatScore(next, side);
+    const int vulnerable = vulnerablePiecePenalty(next, side);
+    const int kingExposure = kingExposurePenalty(next, side);
+    return (threat + vulnerable + kingExposure) * scale / 100;
+}
+
 } // namespace
 
 LearningEngine::LearningEngine()
@@ -138,13 +272,19 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
 
     const Color rootSide = board.side;
     const std::vector<Move> orderedMoves = orderMoves(board, legal, rootSide);
+    std::vector<int> openingPenalties(orderedMoves.size(), 0);
+    if (openingSafety_) {
+        for (std::size_t i = 0; i < orderedMoves.size(); ++i) {
+            openingPenalties[i] = openingTrapPenalty(board, orderedMoves[i], rootSide);
+        }
+    }
     int completedDepth = 0;
     int bestScore = std::numeric_limits<int>::min();
     std::vector<Move> bestMoves;
     const int maxDepth = depthLimit();
     for (int depth = 1; depth <= maxDepth && !shouldStop(); ++depth) {
         const std::uint64_t nodesBeforeDepth = nodes_.load();
-        const std::vector<int> scores = scoreRootMovesParallel(board, orderedMoves, rootSide, depth, searchStart, infoCallback);
+        const std::vector<int> scores = scoreRootMovesParallel(board, orderedMoves, openingPenalties, rootSide, depth, searchStart, infoCallback);
         if (shouldStop() && nodes_.load() == nodesBeforeDepth) {
             break;
         }
@@ -227,6 +367,10 @@ void LearningEngine::setHeavyEvaluation(bool enabled) {
     evaluator_.setHeavyFeatures(enabled);
 }
 
+void LearningEngine::setOpeningSafety(bool enabled) {
+    openingSafety_ = enabled;
+}
+
 void LearningEngine::setThreads(int threads) {
     threads_ = std::clamp(threads, 1, 256);
 }
@@ -294,11 +438,12 @@ bool LearningEngine::chooseMoveByGpu(const Board& board, const std::vector<Move>
     int bestScore = std::numeric_limits<int>::min();
     std::vector<Move> bestMoves;
     for (std::size_t i = 0; i < legal.size(); ++i) {
-        if (scores[i] > bestScore) {
-            bestScore = scores[i];
+        const int adjustedScore = scores[i] - (openingSafety_ ? openingTrapPenalty(board, legal[i], board.side) : 0);
+        if (adjustedScore > bestScore) {
+            bestScore = adjustedScore;
             bestMoves.clear();
             bestMoves.push_back(legal[i]);
-        } else if (scores[i] == bestScore) {
+        } else if (adjustedScore == bestScore) {
             bestMoves.push_back(legal[i]);
         }
     }
@@ -504,6 +649,7 @@ bool LearningEngine::isTacticalMove(const Board& board, const Move& move) const 
 std::vector<int> LearningEngine::scoreRootMovesParallel(
     const Board& board,
     const std::vector<Move>& orderedMoves,
+    const std::vector<int>& openingPenalties,
     Color rootSide,
     int depth,
     const std::chrono::steady_clock::time_point& searchStart,
@@ -557,6 +703,9 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
             Board next = board;
             applyMove(next, orderedMoves[i]);
             scores[i] = search(next, depth - 1, -MateScore, MateScore, rootSide);
+            if (i < openingPenalties.size()) {
+                scores[i] -= openingPenalties[i];
+            }
             publish(i, scores[i], i + 1 == orderedMoves.size());
         }
         return scores;
@@ -575,6 +724,9 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
                 Board next = board;
                 applyMove(next, orderedMoves[index]);
                 scores[index] = search(next, depth - 1, -MateScore, MateScore, rootSide);
+                if (index < openingPenalties.size()) {
+                    scores[index] -= openingPenalties[index];
+                }
                 publish(index, scores[index], index + 1 == orderedMoves.size());
             }
         });
@@ -588,14 +740,28 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
 }
 
 std::vector<Move> LearningEngine::orderMoves(const Board& board, const std::vector<Move>& moves, Color rootSide) const {
-    std::vector<Move> ordered = moves;
-    std::stable_sort(ordered.begin(), ordered.end(), [&](const Move& left, const Move& right) {
-        return moveOrderScore(board, left, rootSide) > moveOrderScore(board, right, rootSide);
+    struct ScoredMove {
+        Move move;
+        int score = 0;
+    };
+    std::vector<ScoredMove> scored;
+    scored.reserve(moves.size());
+    for (const Move& move : moves) {
+        scored.push_back(ScoredMove{move, moveOrderScore(board, move, rootSide)});
+    }
+    std::stable_sort(scored.begin(), scored.end(), [](const ScoredMove& left, const ScoredMove& right) {
+        return left.score > right.score;
     });
+    std::vector<Move> ordered;
+    ordered.reserve(scored.size());
+    for (const ScoredMove& item : scored) {
+        ordered.push_back(item.move);
+    }
     return ordered;
 }
 
 int LearningEngine::moveOrderScore(const Board& board, const Move& move, Color rootSide) const {
+    (void)rootSide;
     int score = 0;
     if (!move.isDrop() && board.squares[move.to] != 0) {
         const PieceType captured = typeOf(board.squares[move.to]);
@@ -613,7 +779,6 @@ int LearningEngine::moveOrderScore(const Board& board, const Move& move, Color r
     if (isKingAttacked(next, next.side)) {
         score += 8000;
     }
-    score += evaluator_.evaluate(next, rootSide) / 64;
     return score;
 }
 

@@ -24,7 +24,7 @@ public:
 
 private:
     std::array<double, FeatureCount> weights_{};
-    bool heavyFeatures_ = true;
+    bool heavyFeatures_ = false;
 };
 
 FeatureVector operator-(const FeatureVector& left, const FeatureVector& right);

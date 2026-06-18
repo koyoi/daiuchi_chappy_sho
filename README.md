@@ -61,6 +61,7 @@ quit
 - `setoption name MaxMoveTimeMs value 50..600000`
 - `setoption name Threads value 1..256`
 - `setoption name HeavyEvaluation value true|false`
+- `setoption name OpeningSafety value true|false`
 - `setoption name WeightsFile value random-shogi.weights`
 - `setoption name TrainingDataFile value gpu_training.tsv`
 - `setoption name UseGpu value true|false`
@@ -78,6 +79,8 @@ quit
 - `gameover`
 
 `gameover win` / `gameover lose` を受けると、その対局中の自分と相手の指し手から `random-shogi.weights` を更新します。勝った側の手は模倣方向、負けた側の手は抑制方向に評価関数の重みを動かします。
+
+`OpeningSafety=true` は序盤用の罠回避ヒューリスティックです。定跡手順は持たず、候補手の後に相手が即王手、大駒取り、成り、玉周辺への危険な打ち込みをできる場合に減点します。序盤ほど強く働き、手数が進むと自動的に弱まります。
 
 学習ファイルは起動時に自動ロードされ、対局終了時に保存されます。別の重みファイルを使う場合は次のように指定します。
 
