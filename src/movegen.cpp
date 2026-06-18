@@ -153,8 +153,11 @@ Bitboard attackersOf(const Board& board, int square, Color byColor) {
     return attackers;
 }
 
-// 筋ごとのBitboardマスク（二歩判定用）
+} // namespace (anonymous) — reopen below
+
 Bitboard FileMask[10]; // 1〜9筋
+
+namespace {
 bool fileMaskInitialized = false;
 
 void initFileMasks() {

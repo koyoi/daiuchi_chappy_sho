@@ -19,10 +19,29 @@ constexpr std::array<double, FeatureCount> DefaultWeights = {
     45.0, 35.0, 22.0, 30.0,
     55.0, 42.0, 28.0, 32.0,
     24.0, 18.0, 10.0,
-    0.35, 0.70, 0.45, 0.20,
+    35.0, 70.0, 45.0, 20.0,
     95.0, 55.0, 35.0, 180.0,
-    30.0, 0.45, 45.0, 4.0,
+    30.0, 45.0, 45.0, 4.0,
     18.0, 12.0,
+    10.0, 30.0,
+};
+
+constexpr int PstRank[PieceTypeCount][9] = {
+    {},
+    {3, 2, 2, 1, 0, 0, -1, -1, -1},
+    {2, 2, 1, 1, 0, 0, -1, -1, -1},
+    {3, 2, 2, 1, 0, 0, -1, -2, -2},
+    {2, 2, 1, 1, 0, 0, -1, -1, -1},
+    {1, 1, 1, 1, 0, 0, 0, 0, -1},
+    {},
+    {},
+    {},
+    {1, 1, 0, 0, 0, 0, 0, 0, 0},
+    {1, 1, 0, 0, 0, 0, 0, 0, 0},
+    {1, 1, 0, 0, 0, 0, 0, 0, 0},
+    {1, 1, 0, 0, 0, 0, 0, 0, 0},
+    {1, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, 0, 0, 0, 0, 0, 0, 0, 0},
 };
 
 int featureIndexForBoardPiece(PieceType type) {
@@ -237,6 +256,10 @@ FeatureVector Evaluator::extractFeatures(const Board& board, Color perspective) 
         }
 
         const int rank = rankOf(square);
+        const int relRank = owner == Black ? rank : 10 - rank;
+        if (type < PieceTypeCount) {
+            features[42] += sign * PstRank[type][relRank - 1];
+        }
         if (inPromotionZone(owner, rank)) {
             features[17] += sign;
         }
@@ -324,10 +347,10 @@ FeatureVector Evaluator::extractFeatures(const Board& board, Color perspective) 
         }
     }
     features[27] = ownPromoted - enemyPromoted;
-    features[28] = attackedEnemyValue - attackedOwnValue;
-    features[29] = hangingEnemyValue - hangingOwnValue;
-    features[30] = looseEnemyValue - looseOwnValue;
-    features[31] = defendedOwnValue - defendedEnemyValue;
+    features[28] = (attackedEnemyValue - attackedOwnValue) / 100.0;
+    features[29] = (hangingEnemyValue - hangingOwnValue) / 100.0;
+    features[30] = (looseEnemyValue - looseOwnValue) / 100.0;
+    features[31] = (defendedOwnValue - defendedEnemyValue) / 100.0;
 
     const Color enemy = opposite(perspective);
     const int ownKingAttackers = ownKing >= 0 ? attackersFromMap(attacks, ownKing, enemy) : 0;
@@ -341,12 +364,25 @@ FeatureVector Evaluator::extractFeatures(const Board& board, Color perspective) 
         const TacticalSummary ownTactics = summarizeLegalMoves(board, perspective);
         const TacticalSummary enemyTactics = summarizeLegalMoves(board, enemy);
         features[36] = ownTactics.checkMoves - enemyTactics.checkMoves;
-        features[37] = ownTactics.bestCapture - enemyTactics.bestCapture;
+        features[37] = (ownTactics.bestCapture - enemyTactics.bestCapture) / 100.0;
         features[38] = ownTactics.promotionMoves - enemyTactics.promotionMoves;
         features[39] = ownTactics.legalMoves - enemyTactics.legalMoves;
         features[41] = (ownTactics.checkMoves + ownTactics.promotionMoves) - (enemyTactics.checkMoves + enemyTactics.promotionMoves);
     }
     features[40] = attackedKingRingSquares(board, attacks, perspective, enemy) - attackedKingRingSquares(board, attacks, enemy, perspective);
+
+    auto pawnShelter = [&](Color color) -> int {
+        const int king = color == Black ? board.blackKingSquare : board.whiteKingSquare;
+        if (king < 0) return 0;
+        const int kf = fileOf(king);
+        const int ci = color == Black ? 0 : 1;
+        Bitboard ownPawns = board.pieceBB[Pawn] & board.occupied[ci];
+        Bitboard mask;
+        for (int f = std::max(1, kf - 1); f <= std::min(9, kf + 1); ++f)
+            mask |= FileMask[f];
+        return (ownPawns & mask).popcount();
+    };
+    features[43] = pawnShelter(perspective) - pawnShelter(enemy);
 
     return features;
 }
@@ -377,6 +413,10 @@ bool Evaluator::load(const std::string& path) {
     if (!readAny) {
         return false;
     }
+    for (int i = 0; i < FeatureCount; ++i) {
+        double maxW = std::max(std::abs(DefaultWeights[i]) * 5.0, 5.0);
+        loaded[i] = std::clamp(loaded[i], -maxW, maxW);
+    }
     weights_ = loaded;
     return true;
 }
@@ -393,8 +433,11 @@ bool Evaluator::save(const std::string& path) const {
 }
 
 void Evaluator::applyDelta(const FeatureVector& delta, double scale) {
+    constexpr double L2Lambda = 0.001;
     for (int i = 0; i < FeatureCount; ++i) {
-        weights_[i] = std::clamp(weights_[i] + delta[i] * scale, -100000.0, 100000.0);
+        weights_[i] *= (1.0 - L2Lambda);
+        double maxW = std::max(std::abs(DefaultWeights[i]) * 5.0, 5.0);
+        weights_[i] = std::clamp(weights_[i] + delta[i] * scale, -maxW, maxW);
     }
 }
 

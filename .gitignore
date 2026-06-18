@@ -13,3 +13,4 @@ uv.lock
 gpu_training.tsv
 .vs/
 __pycache__/
+/kifu/

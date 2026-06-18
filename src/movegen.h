@@ -15,4 +15,6 @@ bool isSquareAttacked(const Board& board, int square, Color byColor);
 int countAttackers(const Board& board, int square, Color byColor);
 int findKing(const Board& board, Color color);
 
+extern Bitboard FileMask[10];
+
 } // namespace shogi

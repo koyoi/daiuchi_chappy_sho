@@ -3,12 +3,12 @@
 #include "evaluation.h"
 #include "gpu_bridge.h"
 #include "learning.h"
+#include "search_types.h"
 #include "shogi_types.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <functional>
 #include <mutex>
 #include <random>
 #include <string>
@@ -16,22 +16,6 @@
 #include <vector>
 
 namespace shogi {
-
-struct SearchLimits {
-    int moveTimeMs = -1;
-};
-
-struct SearchInfo {
-    int depth = 0;
-    int scoreCp = 0;
-    std::uint64_t nodes = 0;
-    int timeMs = 0;
-    Move bestMove{};
-    bool hasBestMove = false;
-    std::vector<Move> pv;
-};
-
-using InfoCallback = std::function<void(const SearchInfo&)>;
 
 class LearningEngine {
 public:

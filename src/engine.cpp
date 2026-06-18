@@ -24,7 +24,7 @@ namespace shogi {
 
 namespace {
 
-constexpr int MateScore = 29000;       // 詰みの評価値（十分大きな値）
+constexpr int MateScore = 100000;      // 詰みの評価値（評価関数の範囲±30000と重ならない値）
 constexpr int QuiescenceDepth = 2;     // 静止探索の最大深さ
 constexpr int ExactScore = 0;          // 置換表: 正確な評価値
 constexpr int LowerBound = 1;          // 置換表: 下界（βカット発生）
@@ -750,6 +750,7 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
     auto publish = [&](std::size_t index, int score, bool force) {
         SearchInfo info;
         bool shouldEmit = false;
+        Move currentBest;
         {
             std::lock_guard<std::mutex> lock(bestMutex);
             if (!hasBestMove || score > bestScore) {
@@ -757,6 +758,7 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
                 bestMove = orderedMoves[index];
                 hasBestMove = true;
             }
+            currentBest = bestMove;
             const auto now = std::chrono::steady_clock::now();
             if (force || now - lastEmit >= std::chrono::milliseconds(250)) {
                 lastEmit = now;
@@ -764,12 +766,17 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
                 info.scoreCp = std::clamp(bestScore, -MateScore, MateScore);
                 info.nodes = nodes_.load();
                 info.timeMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - searchStart).count());
-                info.bestMove = bestMove;
+                info.bestMove = currentBest;
                 info.hasBestMove = hasBestMove;
                 shouldEmit = hasBestMove;
             }
         }
         if (shouldEmit && infoCallback) {
+            info.pv.push_back(currentBest);
+            Board pvBoard = board;
+            applyMove(pvBoard, currentBest);
+            auto pvTail = extractPV(pvBoard, rootSide, depth);
+            info.pv.insert(info.pv.end(), pvTail.begin(), pvTail.end());
             std::lock_guard<std::mutex> emitLock(emitMutex);
             infoCallback(info);
         }

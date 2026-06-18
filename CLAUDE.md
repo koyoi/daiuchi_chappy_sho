@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-C++17 shogi (Japanese chess) engine with online learning. Supports USI and simplified CSA protocols. Features alpha-beta search with iterative deepening, 42-feature linear evaluation, online weight learning from game results, and optional GPU inference/training via PyTorch bridge.
+C++17 shogi (Japanese chess) engine with online learning. Supports USI and simplified CSA protocols. Features alpha-beta search with iterative deepening, 44-feature linear evaluation, online weight learning from game results, and optional GPU inference/training via PyTorch bridge.
 
 ## Build
 
@@ -41,10 +41,10 @@ Entry point (`main.cpp`) selects protocol → `usiLoop()` or `csaLoop()` → `Le
 - **shogi_types** — `Board`, `Move`, `Bitboard` (81-bit: `uint64_t lo` + `uint32_t hi`), `Color`, `PieceType`. Board holds piece array, hand pieces, Zobrist hash (XOR-incremental), king position cache, material score (incremental), and per-color/per-piece-type Bitboards.
 - **position** — `applyMove()` updates all Board state atomically (squares, Bitboards, hash, material, king positions). `startpos()` / `setFromSfen()` initialize from SFEN.
 - **movegen** — Bitboard-based move generation. Pre-computed step-attack tables for short-range pieces; slide functions for lance/bishop/rook. `attackersOf()` returns Bitboard of all attackers of a square. `generateLegalMoves()` filters pseudo-legal moves by checking king safety and pawn-drop mate.
-- **evaluation** — `Evaluator` extracts 42 features (piece counts, hand pieces, king safety, attack maps, tactical summaries) and computes score as `dot(features, weights)`. `buildAttackMap()` uses Bitboard-based `countAttackers()`. Optional heavy features (index 36-41) require full legal move generation per side.
+- **evaluation** — `Evaluator` extracts 44 features (piece counts, hand pieces, king safety, attack maps, PST, king shelter, tactical summaries) and computes score as `dot(features, weights)`. Features 28-31,37 are /100 normalized. L2 regularization in weight updates. `buildAttackMap()` uses Bitboard-based `countAttackers()`. Optional heavy features (index 36-41) require full legal move generation per side.
 - **engine** — `LearningEngine::chooseMove()` runs iterative deepening. `search()` is alpha-beta with transposition table (fixed-size 2^20 array, 64-stripe lock sharding, generation counter). `quiescence()` extends search for tactical moves. Root moves scored in parallel via thread pool. Move ordering: MVV-LVA captures > checks > promotions > drops.
 - **learning** — `OnlineLearner` records moves during a game. On `finishGame()`, updates weights by comparing chosen-move features against average-of-legal-moves features, scaled by win/loss outcome, actor type (engine vs human), and recency.
-- **gpu_bridge** — Spawns `tools/gpu_eval.py` as subprocess for batch inference (`score`) or training (`train`). Model: 42→64→32→1 MLP. Falls back to CPU evaluation on failure.
+- **gpu_bridge** — Spawns `tools/gpu_eval.py` as subprocess for batch inference (`score`) or training (`train`). Model: 44→64→32→1 MLP. Falls back to CPU evaluation on failure.
 
 ### Piece Encoding
 
@@ -65,7 +65,7 @@ Fixed-size array of 2^20 entries, indexed by `hash & mask`. 64 stripe mutexes se
 | `src/shogi_types.h/cpp` | Board, Bitboard, Move, Zobrist, init functions |
 | `src/movegen.cpp` | Attack tables, move generation, legality checking |
 | `src/engine.cpp` | Search (alpha-beta, quiescence, mate detection), move ordering |
-| `src/evaluation.cpp` | 42-feature extraction, linear evaluation, attack maps |
+| `src/evaluation.cpp` | 44-feature extraction, linear evaluation, PST, king shelter |
 | `src/position.cpp` | applyMove, SFEN parsing, board initialization |
 | `src/learning.cpp` | Online weight learning from game outcomes |
 | `src/gpu_bridge.cpp` | Python subprocess for GPU inference/training |
