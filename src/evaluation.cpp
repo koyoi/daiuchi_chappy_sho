@@ -78,18 +78,9 @@ struct AttackMap {
 
 AttackMap buildAttackMap(const Board& board) {
     AttackMap map;
-    for (int from = 0; from < BoardSize; ++from) {
-        const int piece = board.squares[from];
-        if (piece == 0) {
-            continue;
-        }
-        const Color owner = static_cast<Color>(colorOf(piece));
-        const int ownerIndex = colorIndex(owner);
-        for (int to = 0; to < BoardSize; ++to) {
-            if (from != to && attacksSquare(board, from, to)) {
-                ++map.counts[ownerIndex][to];
-            }
-        }
+    for (int square = 0; square < BoardSize; ++square) {
+        map.counts[0][square] = countAttackers(board, square, Black);
+        map.counts[1][square] = countAttackers(board, square, White);
     }
     return map;
 }

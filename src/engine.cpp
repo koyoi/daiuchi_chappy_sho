@@ -234,7 +234,9 @@ int openingTrapPenalty(const Board& before, const Move& move, Color side) {
 
 LearningEngine::LearningEngine()
     : learner_(evaluator_),
+      transposition_(TTSize),
       rng_(static_cast<unsigned int>(std::chrono::steady_clock::now().time_since_epoch().count())) {
+    zobrist::init();
     threads_ = defaultThreadCount();
     learner_.loadWeights();
 }
@@ -255,10 +257,7 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
     const auto searchStart = std::chrono::steady_clock::now();
     stopped_.store(false);
     nodes_.store(0);
-    {
-        std::lock_guard<std::mutex> lock(transpositionMutex_);
-        transposition_.clear();
-    }
+    ++ttGeneration_;
     // 持ち時間の設定（50ms〜600秒にクランプ）
     const int requestedMoveTime = limits.moveTimeMs > 0 ? limits.moveTimeMs : maxMoveTimeMs_;
     const int moveTime = std::clamp(requestedMoveTime, 50, 600000);
@@ -499,21 +498,22 @@ int LearningEngine::search(Board board, int depth, int alpha, int beta, Color ro
     const int alphaOriginal = alpha;
     const int betaOriginal = beta;
     const std::uint64_t key = boardHash(board, rootSide);
+    const int ttIndex = static_cast<int>(key & TTMask);
+    const int lockIndex = static_cast<int>((key >> TTBits) % LockCount);
     {
-        std::lock_guard<std::mutex> lock(transpositionMutex_);
-        const auto hit = transposition_.find(key);
-        if (hit != transposition_.end() && hit->second.depth >= depth) {
-            const TranspositionEntry entry = hit->second;
-            if (entry.flag == ExactScore) {
-                return entry.score;
+        std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
+        const TranspositionEntry& slot = transposition_[ttIndex];
+        if (slot.key == key && slot.generation == ttGeneration_ && slot.depth >= depth) {
+            if (slot.flag == ExactScore) {
+                return slot.score;
             }
-            if (entry.flag == LowerBound) {
-                alpha = std::max(alpha, entry.score);
-            } else if (entry.flag == UpperBound) {
-                beta = std::min(beta, entry.score);
+            if (slot.flag == LowerBound) {
+                alpha = std::max(alpha, slot.score);
+            } else if (slot.flag == UpperBound) {
+                beta = std::min(beta, slot.score);
             }
             if (alpha >= beta) {
-                return entry.score;
+                return slot.score;
             }
         }
     }
@@ -546,13 +546,16 @@ int LearningEngine::search(Board board, int depth, int alpha, int beta, Color ro
             }
         }
         // 探索結果を置換表に保存
-        TranspositionEntry entry;
-        entry.depth = depth;
-        entry.score = best;
-        entry.flag = best <= alphaOriginal ? UpperBound : (best >= betaOriginal ? LowerBound : ExactScore);
         {
-            std::lock_guard<std::mutex> lock(transpositionMutex_);
-            transposition_[key] = entry;
+            std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
+            TranspositionEntry& slot = transposition_[ttIndex];
+            if (slot.generation != ttGeneration_ || depth >= slot.depth) {
+                slot.key = key;
+                slot.depth = depth;
+                slot.score = best;
+                slot.flag = best <= alphaOriginal ? UpperBound : (best >= betaOriginal ? LowerBound : ExactScore);
+                slot.generation = ttGeneration_;
+            }
         }
         return best;
     }
@@ -568,13 +571,16 @@ int LearningEngine::search(Board board, int depth, int alpha, int beta, Color ro
             break; // αカット: これ以上探索しても自分に有利にならない
         }
     }
-    TranspositionEntry entry;
-    entry.depth = depth;
-    entry.score = best;
-    entry.flag = best <= alphaOriginal ? UpperBound : (best >= betaOriginal ? LowerBound : ExactScore);
     {
-        std::lock_guard<std::mutex> lock(transpositionMutex_);
-        transposition_[key] = entry;
+        std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
+        TranspositionEntry& slot = transposition_[ttIndex];
+        if (slot.generation != ttGeneration_ || depth >= slot.depth) {
+            slot.key = key;
+            slot.depth = depth;
+            slot.score = best;
+            slot.flag = best <= alphaOriginal ? UpperBound : (best >= betaOriginal ? LowerBound : ExactScore);
+            slot.generation = ttGeneration_;
+        }
     }
     return best;
 }
@@ -858,24 +864,10 @@ bool LearningEngine::shouldStop() const {
     return false;
 }
 
-// 局面のハッシュ値を計算 (FNV-1aベース)
-// 盤面・持ち駒・手番を含めて一意に識別するためのキー
+// Zobristハッシュによる差分更新済みの値を返す
+// rootSideも混ぜて同じ局面でも探索視点が異なれば別エントリにする
 std::uint64_t LearningEngine::boardHash(const Board& board, Color rootSide) const {
-    std::uint64_t hash = 1469598103934665603ull;
-    auto mix = [&](std::uint64_t value) {
-        hash ^= value;
-        hash *= 1099511628211ull;
-    };
-    mix(rootSide == Black ? 1u : 2u);
-    mix(board.side == Black ? 3u : 4u);
-    for (int piece : board.squares) {
-        mix(static_cast<std::uint64_t>(piece + 32));
-    }
-    for (int i = 0; i < 15; ++i) {
-        mix(static_cast<std::uint64_t>(board.blackHand[i] + 7 * i));
-        mix(static_cast<std::uint64_t>(board.whiteHand[i] + 11 * i));
-    }
-    return hash;
+    return board.hash ^ (rootSide == Black ? 0x9E3779B97F4A7C15ULL : 0x6C62272E07BB0142ULL);
 }
 
 void LearningEngine::setLastSearchInfo(const SearchInfo& info) const {

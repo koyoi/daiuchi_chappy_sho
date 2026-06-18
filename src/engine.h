@@ -13,7 +13,6 @@
 #include <random>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 namespace shogi {
@@ -84,16 +83,24 @@ private:
     int depthLimit() const;
 
     struct TranspositionEntry {
+        std::uint64_t key = 0;
         int depth = -1;
         int score = 0;
-        int flag = 0;
+        std::uint8_t flag = 0;
+        std::uint8_t generation = 0;
     };
+
+    static constexpr int TTBits = 20;
+    static constexpr int TTSize = 1 << TTBits;
+    static constexpr int TTMask = TTSize - 1;
+    static constexpr int LockCount = 64;
 
     Evaluator evaluator_;
     OnlineLearner learner_;
     GpuBridge gpu_;
-    mutable std::unordered_map<std::uint64_t, TranspositionEntry> transposition_;
-    mutable std::mutex transpositionMutex_;
+    mutable std::vector<TranspositionEntry> transposition_;
+    mutable std::array<std::mutex, LockCount> transpositionMutex_;
+    mutable std::uint8_t ttGeneration_{0};
     mutable std::chrono::steady_clock::time_point deadline_{};
     mutable std::atomic_bool stopped_{false};
     mutable std::atomic_uint64_t nodes_{0};

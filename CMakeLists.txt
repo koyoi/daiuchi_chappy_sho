@@ -31,7 +31,7 @@ add_custom_command(TARGET random-shogi-engine POST_BUILD
 )
 
 if(MSVC)
-    target_compile_options(random-shogi-engine PRIVATE /W4 /permissive-)
+    target_compile_options(random-shogi-engine PRIVATE /W4 /permissive- /utf-8)
 else()
     target_compile_options(random-shogi-engine PRIVATE -Wall -Wextra -Wpedantic)
 endif()

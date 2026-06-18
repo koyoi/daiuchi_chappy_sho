@@ -41,6 +41,10 @@ Board startpos() {
     }
     board.side = Black;
     board.moveNumber = 1;
+    initKingSquares(board);
+    initBitboards(board);
+    initMaterialScore(board);
+    initBoardHash(board);
     return board;
 }
 
@@ -107,27 +111,85 @@ bool setFromSfen(Board& board, const std::string& boardPart, const std::string& 
     } catch (...) {
         board.moveNumber = 1;
     }
+    initKingSquares(board);
+    initBitboards(board);
+    initMaterialScore(board);
+    initBoardHash(board);
     return true;
 }
 
 void applyMove(Board& board, const Move& move) {
     Color color = board.side;
+    const int colorIdx = color == Black ? 0 : 1;
+
+    const int enemyIdx = 1 - colorIdx;
+
+    const int sign = color == Black ? 1 : -1;
+
     if (move.isDrop()) {
-        board.squares[move.to] = makePiece(color, move.drop);
+        const int newPiece = makePiece(color, move.drop);
+        board.squares[move.to] = newPiece;
+        board.hash ^= zobrist::pieceKey(move.to, newPiece);
+        board.occupied[colorIdx].set(move.to);
+        board.pieceBB[move.drop].set(move.to);
+
+        // 持ち駒から盤上へ（駒割りは変化しない: 持ち駒減少=盤上増加で相殺）
+        const int oldCount = hand(board, color)[move.drop];
+        board.hash ^= zobrist::handKey(colorIdx, move.drop, oldCount);
         --hand(board, color)[move.drop];
+        board.hash ^= zobrist::handKey(colorIdx, move.drop, oldCount - 1);
     } else {
         const int moving = board.squares[move.from];
         const int captured = board.squares[move.to];
         PieceType type = typeOf(moving);
+
+        board.hash ^= zobrist::pieceKey(move.from, moving);
+        board.occupied[colorIdx].clear(move.from);
+        board.pieceBB[type].clear(move.from);
+
         if (captured != 0) {
-            ++hand(board, color)[unpromote(typeOf(captured))];
+            const PieceType capType = typeOf(captured);
+            board.hash ^= zobrist::pieceKey(move.to, captured);
+            board.occupied[enemyIdx].clear(move.to);
+            board.pieceBB[capType].clear(move.to);
+
+            // 駒割り更新: 相手の駒が盤上から消え(+capValue)、
+            // 自分の持ち駒に素駒として加わる(+baseValue)
+            const int capValue = materialPieceValue(capType);
+            const PieceType capBase = unpromote(capType);
+            const int baseValue = materialPieceValue(capBase);
+            board.materialScore += sign * (capValue + baseValue);
+
+            const int oldCount = hand(board, color)[capBase];
+            board.hash ^= zobrist::handKey(colorIdx, capBase, oldCount);
+            ++hand(board, color)[capBase];
+            board.hash ^= zobrist::handKey(colorIdx, capBase, oldCount + 1);
         }
+
         if (move.promote) {
+            // 成り: 成駒と素駒の価値差を加算
+            const int promGain = materialPieceValue(promote(type)) - materialPieceValue(type);
+            board.materialScore += sign * promGain;
             type = promote(type);
         }
+
         board.squares[move.from] = 0;
-        board.squares[move.to] = makePiece(color, type);
+        const int newPiece = makePiece(color, type);
+        board.squares[move.to] = newPiece;
+        board.hash ^= zobrist::pieceKey(move.to, newPiece);
+        board.occupied[colorIdx].set(move.to);
+        board.pieceBB[type].set(move.to);
+
+        if (typeOf(moving) == King) {
+            if (color == Black) {
+                board.blackKingSquare = move.to;
+            } else {
+                board.whiteKingSquare = move.to;
+            }
+        }
     }
+
+    board.hash ^= zobrist::sideKey();
     board.side = opposite(board.side);
     ++board.moveNumber;
 }
