@@ -6,7 +6,9 @@ Board state protocol:
   + 7 black hand counts (Pawn..Rook)
   + 7 white hand counts (Pawn..Rook)
   + 1 side (0=black, 1=white)
-  = 96 integers, space-separated.
+  + 81 own attack counts per square (clamped 0-8)
+  + 81 opponent attack counts per square (clamped 0-8)
+  = 258 integers, space-separated.
 
 Policy output: 2187 floats (81 squares * 27 channels).
   Channels 0-9: direction without promotion
@@ -15,9 +17,9 @@ Policy output: 2187 floats (81 squares * 27 channels).
 
 Serve protocol (stdin/stdout, line-based):
   -> ready
-  <- eval <96 ints>
+  <- eval <258 ints>
   -> <value> <2187 policy floats>
-  <- batch <N> | <96 ints> | <96 ints> | ...
+  <- batch <N> | <258 ints> | <258 ints> | ...
   -> <value> <2187 policy floats>  (one line per board)
   <- train <path> <epochs>
   -> ok
@@ -38,7 +40,9 @@ VOCAB_SIZE = 29       # 0=empty, 1-14=black, 15-28=white
 HAND_MAX = 19         # max hand count per type (pawns)
 SEQ_LEN = 95          # 81 board + 14 hand slots
 POLICY_SIZE = 2187    # 81 * 27
-STATE_SIZE = 96       # 81 + 7 + 7 + 1
+MAX_ATTACK = 8        # max attack count per square (clamped)
+BASE_STATE_SIZE = 96  # 81 + 7 + 7 + 1
+STATE_SIZE = 258      # 96 + 81 own attacks + 81 opp attacks
 
 
 def import_torch():
@@ -78,6 +82,8 @@ class ShogiTransformerModel:
                 self.hand_pos_embed = nn.Embedding(2 * HAND_TYPES, d_model)
                 self.hand_count_embed = nn.Embedding(HAND_MAX + 1, d_model)
                 self.side_embed = nn.Embedding(2, d_model)
+                self.own_attack_embed = nn.Embedding(MAX_ATTACK + 1, d_model)
+                self.opp_attack_embed = nn.Embedding(MAX_ATTACK + 1, d_model)
 
                 self.cnn = nn.Sequential(
                     nn.Conv2d(d_model, d_model, 3, padding=1),
@@ -104,7 +110,8 @@ class ShogiTransformerModel:
                     nn.Linear(512, POLICY_SIZE),
                 )
 
-            def forward(self, board_tokens, hand_tokens, side_token):
+            def forward(self, board_tokens, hand_tokens, side_token,
+                        own_atk=None, opp_atk=None):
                 B = board_tokens.shape[0]
                 dev = board_tokens.device
                 d = self.d_model
@@ -113,6 +120,11 @@ class ShogiTransformerModel:
                 files = torch.arange(BOARD_SQUARES, device=dev) % 9
                 ranks = torch.arange(BOARD_SQUARES, device=dev) // 9
                 board_emb = board_emb + self.file_embed(files) + self.rank_embed(ranks)
+
+                if own_atk is not None:
+                    board_emb = board_emb + self.own_attack_embed(own_atk)
+                if opp_atk is not None:
+                    board_emb = board_emb + self.opp_attack_embed(opp_atk)
 
                 residual = board_emb
                 x = board_emb.transpose(1, 2).reshape(B, d, 9, 9)
@@ -140,32 +152,41 @@ class ShogiTransformerModel:
         return _Model()
 
 
-def parse_board_state(tokens: List[str]) -> Tuple[List[int], List[int], int]:
-    """Parse 96 integers into (squares[81], hand[14], side)."""
-    if len(tokens) < STATE_SIZE:
-        raise ValueError(f"expected {STATE_SIZE} tokens, got {len(tokens)}")
-    vals = [int(t) for t in tokens[:STATE_SIZE]]
+def parse_board_state(tokens: List[str]) -> Tuple[List[int], List[int], int, List[int], List[int]]:
+    """Parse 258 integers into (squares[81], hand[14], side, own_atk[81], opp_atk[81])."""
+    vals = [int(t) for t in tokens[:max(len(tokens), STATE_SIZE)]]
     squares = vals[:BOARD_SQUARES]
     hand = vals[BOARD_SQUARES:BOARD_SQUARES + 2 * HAND_TYPES]
-    side = vals[-1]
-    return squares, hand, side
+    side = vals[BOARD_SQUARES + 2 * HAND_TYPES]
+    if len(vals) >= STATE_SIZE:
+        own_atk = vals[BASE_STATE_SIZE:BASE_STATE_SIZE + BOARD_SQUARES]
+        opp_atk = vals[BASE_STATE_SIZE + BOARD_SQUARES:STATE_SIZE]
+    else:
+        own_atk = [0] * BOARD_SQUARES
+        opp_atk = [0] * BOARD_SQUARES
+    return squares, hand, side, own_atk, opp_atk
 
 
 def boards_to_tensors(boards_data, torch_mod, device):
-    """Convert list of (squares, hand, side) to tensors."""
+    """Convert list of (squares, hand, side, own_atk, opp_atk) to tensors."""
     B = len(boards_data)
     board_t = torch_mod.zeros(B, BOARD_SQUARES, dtype=torch_mod.long, device=device)
     hand_t = torch_mod.zeros(B, 2 * HAND_TYPES, dtype=torch_mod.long, device=device)
     side_t = torch_mod.zeros(B, dtype=torch_mod.long, device=device)
+    own_atk_t = torch_mod.zeros(B, BOARD_SQUARES, dtype=torch_mod.long, device=device)
+    opp_atk_t = torch_mod.zeros(B, BOARD_SQUARES, dtype=torch_mod.long, device=device)
 
-    for i, (squares, hand, side) in enumerate(boards_data):
+    for i, (squares, hand, side, own_atk, opp_atk) in enumerate(boards_data):
         for j, s in enumerate(squares):
             board_t[i, j] = max(0, min(s, VOCAB_SIZE - 1))
         for j, h in enumerate(hand):
             hand_t[i, j] = max(0, min(h, HAND_MAX))
         side_t[i] = side
+        for j in range(BOARD_SQUARES):
+            own_atk_t[i, j] = min(own_atk[j], MAX_ATTACK) if j < len(own_atk) else 0
+            opp_atk_t[i, j] = min(opp_atk[j], MAX_ATTACK) if j < len(opp_atk) else 0
 
-    return board_t, hand_t, side_t
+    return board_t, hand_t, side_t, own_atk_t, opp_atk_t
 
 
 def softmax(logits: list) -> list:
@@ -223,10 +244,11 @@ def serve(args):
         if line.startswith("eval "):
             tokens = line[5:].split()
             try:
-                squares, hand, side = parse_board_state(tokens)
-                bt, ht, st = boards_to_tensors([(squares, hand, side)], torch_mod, device)
+                squares, hand, side, own_atk, opp_atk = parse_board_state(tokens)
+                bt, ht, st, oat, opt = boards_to_tensors(
+                    [(squares, hand, side, own_atk, opp_atk)], torch_mod, device)
                 with torch_mod.no_grad():
-                    value, policy_logits = model(bt, ht, st)
+                    value, policy_logits = model(bt, ht, st, oat, opt)
                 v = value.item()
                 p = softmax(policy_logits[0].cpu().tolist())
                 out_parts = [f"{v:.6f}"] + [f"{x:.6f}" for x in p]
@@ -246,12 +268,12 @@ def serve(args):
                 boards_data = []
                 for i in range(1, n + 1):
                     tokens = parts[i].strip().split()
-                    squares, hand, side = parse_board_state(tokens)
-                    boards_data.append((squares, hand, side))
+                    squares, hand, side, own_atk, opp_atk = parse_board_state(tokens)
+                    boards_data.append((squares, hand, side, own_atk, opp_atk))
 
-                bt, ht, st = boards_to_tensors(boards_data, torch_mod, device)
+                bt, ht, st, oat, opt = boards_to_tensors(boards_data, torch_mod, device)
                 with torch_mod.no_grad():
-                    values, policy_logits = model(bt, ht, st)
+                    values, policy_logits = model(bt, ht, st, oat, opt)
 
                 for i in range(n):
                     v = values[i].item()
@@ -288,7 +310,7 @@ def serve(args):
 def _train_from_file(model, data_path, epochs, torch_mod, nn, device, model_path):
     """Train from self-play data file.
 
-    Format per line: value_label <96 board state ints> <policy target: move_index>
+    Format per line: value_label <258 board state ints> <policy target: move_index>
     """
     import torch
 
@@ -299,20 +321,20 @@ def _train_from_file(model, data_path, epochs, torch_mod, nn, device, model_path
     with open(data_path, "r", encoding="utf-8") as f:
         for line in f:
             parts = line.strip().split()
-            if len(parts) < STATE_SIZE + 2:
+            if len(parts) < BASE_STATE_SIZE + 2:
                 continue
             v = float(parts[0])
             state_tokens = parts[1:STATE_SIZE + 1]
-            move_idx = int(parts[STATE_SIZE + 1])
-            squares, hand, side = parse_board_state(state_tokens)
+            move_idx = int(parts[-1])
+            squares, hand, side, own_atk, opp_atk = parse_board_state(state_tokens)
             values.append(v)
-            boards_data.append((squares, hand, side))
+            boards_data.append((squares, hand, side, own_atk, opp_atk))
             policy_targets.append(move_idx)
 
     if not boards_data:
         return
 
-    bt, ht, st = boards_to_tensors(boards_data, torch_mod, device)
+    bt, ht, st, oat, opt = boards_to_tensors(boards_data, torch_mod, device)
     value_targets = torch_mod.tensor(values, dtype=torch_mod.float32, device=device)
     policy_idx = torch_mod.tensor(policy_targets, dtype=torch_mod.long, device=device)
 
@@ -328,7 +350,7 @@ def _train_from_file(model, data_path, epochs, torch_mod, nn, device, model_path
         perm = torch_mod.randperm(n, device=device)
         for start in range(0, n, batch_size):
             idx = perm[start:start + batch_size]
-            pred_v, pred_p = model(bt[idx], ht[idx], st[idx])
+            pred_v, pred_p = model(bt[idx], ht[idx], st[idx], oat[idx], opt[idx])
             loss_v = value_loss_fn(pred_v, value_targets[idx])
             loss_p = policy_loss_fn(pred_p, policy_idx[idx])
             loss = loss_v + loss_p

@@ -97,6 +97,15 @@ std::string NNBridge::encodeBoardState(const Board& board) {
         oss << ' ' << board.whiteHand[pt];
     }
     oss << ' ' << (board.side == Black ? 0 : 1);
+    // Own and opponent attack counts per square (81 + 81 = 162 values)
+    Color own = board.side;
+    Color opp = (own == Black) ? White : Black;
+    for (int sq = 0; sq < 81; ++sq) {
+        oss << ' ' << std::min(8, countAttackers(board, sq, own));
+    }
+    for (int sq = 0; sq < 81; ++sq) {
+        oss << ' ' << std::min(8, countAttackers(board, sq, opp));
+    }
     return oss.str();
 }
 

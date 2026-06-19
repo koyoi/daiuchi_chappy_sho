@@ -34,6 +34,84 @@ PIECE_TYPE_FROM_ID = {
 
 HAND_INDEX = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6}  # PieceType -> hand array index
 
+MAX_ATTACK = 8
+
+# --- Attack computation ---
+
+def _step_dirs(pt: int, color: int) -> list:
+    """Return step-attack directions (df, dr) in absolute coordinates."""
+    fwd = -color  # Black forward = rank-1, White forward = rank+1
+    if pt == 1:  # Pawn
+        return [(0, fwd)]
+    elif pt == 3:  # Knight
+        return [(-1, 2 * fwd), (1, 2 * fwd)]
+    elif pt == 4:  # Silver
+        return [(-1, fwd), (0, fwd), (1, fwd), (-1, -fwd), (1, -fwd)]
+    elif pt in (5, 9, 10, 11, 12):  # Gold / promoted Pawn,Lance,Knight,Silver
+        return [(-1, fwd), (0, fwd), (1, fwd), (-1, 0), (1, 0), (0, -fwd)]
+    elif pt == 8:  # King
+        return [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
+    elif pt == 13:  # Horse = Bishop + adjacent orthogonal
+        return [(0, -1), (0, 1), (-1, 0), (1, 0)]
+    elif pt == 14:  # Dragon = Rook + adjacent diagonal
+        return [(-1, -1), (1, -1), (-1, 1), (1, 1)]
+    return []
+
+
+def _slide_dirs(pt: int, color: int) -> list:
+    """Return slide-attack directions (df, dr) in absolute coordinates."""
+    fwd = -color
+    if pt == 2:  # Lance: forward only
+        return [(0, fwd)]
+    elif pt in (6, 13):  # Bishop / Horse
+        return [(-1, -1), (1, -1), (-1, 1), (1, 1)]
+    elif pt in (7, 14):  # Rook / Dragon
+        return [(0, -1), (0, 1), (-1, 0), (1, 0)]
+    return []
+
+
+def compute_attacks(board) -> tuple:
+    """Compute per-square attack counts from current side's perspective.
+
+    Returns (own_attacks[81], opp_attacks[81]) clamped to MAX_ATTACK.
+    """
+    black_atk = [0] * 81
+    white_atk = [0] * 81
+
+    for sq in range(81):
+        piece = board.squares[sq]
+        if piece == 0:
+            continue
+        color = 1 if piece > 0 else -1
+        pt = abs(piece)
+        f, r = file_of(sq), rank_of(sq)
+        target = black_atk if color == 1 else white_atk
+
+        for df, dr in _step_dirs(pt, color):
+            nf, nr = f + df, r + dr
+            if 1 <= nf <= 9 and 1 <= nr <= 9:
+                target[idx(nf, nr)] += 1
+
+        for df, dr in _slide_dirs(pt, color):
+            nf, nr = f + df, r + dr
+            while 1 <= nf <= 9 and 1 <= nr <= 9:
+                target[idx(nf, nr)] += 1
+                if board.squares[idx(nf, nr)] != 0:
+                    break
+                nf += df
+                nr += dr
+
+    if board.side == 1:
+        own, opp = black_atk, white_atk
+    else:
+        own, opp = white_atk, black_atk
+
+    return (
+        [min(c, MAX_ATTACK) for c in own],
+        [min(c, MAX_ATTACK) for c in opp],
+    )
+
+
 # Direction encoding for policy (matches nn_bridge.cpp)
 DIR_UP = 0; DIR_DOWN = 1; DIR_LEFT = 2; DIR_RIGHT = 3
 DIR_UL = 4; DIR_UR = 5; DIR_DL = 6; DIR_DR = 7
@@ -92,7 +170,11 @@ class Board:
         self.side = 1  # 1=Black, -1=White
 
     def encode(self) -> List[int]:
-        """Encode board state as 96 integers for NN input."""
+        """Encode board state as 258 integers for NN input.
+
+        Layout: 81 squares + 7 black hand + 7 white hand + 1 side
+                + 81 own attack counts + 81 opponent attack counts.
+        """
         encoded_squares = []
         for s in self.squares:
             if s == 0:
@@ -101,7 +183,9 @@ class Board:
                 encoded_squares.append(s)  # Black: 1-14
             else:
                 encoded_squares.append(14 + (-s))  # White: 15-28
-        return encoded_squares + self.black_hand + self.white_hand + [0 if self.side == 1 else 1]
+        base = encoded_squares + self.black_hand + self.white_hand + [0 if self.side == 1 else 1]
+        own_atk, opp_atk = compute_attacks(self)
+        return base + own_atk + opp_atk
 
     def apply_move(self, from_sq: int, to_sq: int, is_drop: bool, drop_piece: int,
                    promote: bool, side: int):

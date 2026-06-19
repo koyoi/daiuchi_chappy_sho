@@ -26,7 +26,9 @@ VOCAB_SIZE = 29
 HAND_MAX = 19
 SEQ_LEN = 95
 POLICY_SIZE = 2187
-STATE_SIZE = 96
+MAX_ATTACK = 8
+BASE_STATE_SIZE = 96
+STATE_SIZE = 258
 
 
 def import_torch():
@@ -56,6 +58,8 @@ def build_model(nn, d_model=128, nhead=8, num_layers=4, dim_ff=256):
             self.hand_pos_embed = nn.Embedding(2 * HAND_TYPES, d_model)
             self.hand_count_embed = nn.Embedding(HAND_MAX + 1, d_model)
             self.side_embed = nn.Embedding(2, d_model)
+            self.own_attack_embed = nn.Embedding(MAX_ATTACK + 1, d_model)
+            self.opp_attack_embed = nn.Embedding(MAX_ATTACK + 1, d_model)
             self.cnn = nn.Sequential(
                 nn.Conv2d(d_model, d_model, 3, padding=1),
                 nn.ReLU(),
@@ -73,7 +77,8 @@ def build_model(nn, d_model=128, nhead=8, num_layers=4, dim_ff=256):
                 nn.Linear(d_model * BOARD_SQUARES, 512), nn.ReLU(), nn.Linear(512, POLICY_SIZE),
             )
 
-        def forward(self, board_tokens, hand_tokens, side_token):
+        def forward(self, board_tokens, hand_tokens, side_token,
+                    own_atk=None, opp_atk=None):
             B = board_tokens.shape[0]
             dev = board_tokens.device
             d = self.d_model
@@ -82,6 +87,11 @@ def build_model(nn, d_model=128, nhead=8, num_layers=4, dim_ff=256):
             files = torch.arange(BOARD_SQUARES, device=dev) % 9
             ranks = torch.arange(BOARD_SQUARES, device=dev) // 9
             board_emb = board_emb + self.file_embed(files) + self.rank_embed(ranks)
+
+            if own_atk is not None:
+                board_emb = board_emb + self.own_attack_embed(own_atk)
+            if opp_atk is not None:
+                board_emb = board_emb + self.opp_attack_embed(opp_atk)
 
             residual = board_emb
             x = board_emb.transpose(1, 2).reshape(B, d, 9, 9)
@@ -143,6 +153,8 @@ def samples_to_tensors(samples: List[dict], torch_mod, device):
     board_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
     hand_t = torch_mod.zeros(n, 2 * HAND_TYPES, dtype=torch_mod.long)
     side_t = torch_mod.zeros(n, dtype=torch_mod.long)
+    own_atk_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
+    opp_atk_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
     value_t = torch_mod.zeros(n, dtype=torch_mod.float32)
     policy_t = torch_mod.zeros(n, dtype=torch_mod.long)
 
@@ -152,15 +164,21 @@ def samples_to_tensors(samples: List[dict], torch_mod, device):
             board_t[i, j] = max(0, min(enc[j], VOCAB_SIZE - 1))
         for j in range(2 * HAND_TYPES):
             hand_t[i, j] = max(0, min(enc[BOARD_SQUARES + j], HAND_MAX))
-        side_t[i] = enc[-1]
+        side_t[i] = enc[BOARD_SQUARES + 2 * HAND_TYPES]
+        for j in range(BOARD_SQUARES):
+            if BASE_STATE_SIZE + j < len(enc):
+                own_atk_t[i, j] = min(enc[BASE_STATE_SIZE + j], MAX_ATTACK)
+            if BASE_STATE_SIZE + BOARD_SQUARES + j < len(enc):
+                opp_atk_t[i, j] = min(enc[BASE_STATE_SIZE + BOARD_SQUARES + j], MAX_ATTACK)
         value_t[i] = s["value"]
         policy_t[i] = s["move_index"]
 
     return (board_t.to(device), hand_t.to(device), side_t.to(device),
+            own_atk_t.to(device), opp_atk_t.to(device),
             value_t.to(device), policy_t.to(device))
 
 
-def train_model(model, board_t, hand_t, side_t, value_t, policy_t,
+def train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t,
                 torch_mod, nn, device, epochs: int, batch_size: int, lr: float):
     """Train the model on the given data."""
     model.train()
@@ -183,7 +201,8 @@ def train_model(model, board_t, hand_t, side_t, value_t, policy_t,
         total_batches = (n + batch_size - 1) // batch_size
         for start in range(0, n, batch_size):
             idx = perm[start:start + batch_size]
-            pred_v, pred_p = model(board_t[idx], hand_t[idx], side_t[idx])
+            pred_v, pred_p = model(board_t[idx], hand_t[idx], side_t[idx],
+                                   own_atk_t[idx], opp_atk_t[idx])
             loss_v = value_loss_fn(pred_v, value_t[idx])
             loss_p = policy_loss_fn(pred_p, policy_t[idx])
             loss = loss_v + loss_p
@@ -256,7 +275,7 @@ def main():
 
     # Convert to tensors
     print("Converting to tensors...", file=sys.stderr)
-    board_t, hand_t, side_t, value_t, policy_t = samples_to_tensors(
+    board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t = samples_to_tensors(
         samples, torch_mod, device)
     del samples  # free memory
 
@@ -269,7 +288,7 @@ def main():
         print(f"Resumed from {model_path}", file=sys.stderr)
 
     # Train
-    train_model(model, board_t, hand_t, side_t, value_t, policy_t,
+    train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t,
                 torch_mod, nn, device, args.epochs, args.batch_size, args.lr)
 
     # Save
