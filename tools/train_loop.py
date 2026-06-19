@@ -1,39 +1,71 @@
 #!/usr/bin/env python3
 """Versioned training loop with self-play evaluation.
 
-Each round:
-  1. Train on kifu (cumulative, with --resume)
-  2. Save versioned model
-  3. Self-play against previous versions
-  4. Log results
+Features:
+  - Versioned model saves (models/nn_model_v001.pt, v002, ...)
+  - Self-play against previous 1-2 versions every round
+  - Time limit (default 3 hours), safe Ctrl-C interrupt
+  - Auto-resume from last saved version
+  - Progress and results logged to models/training_log.txt
 
 Usage:
-  python train_loop.py --kifu kifu/floodgate --engine build/Release/kishi-to.exe --rounds 10
-  python train_loop.py --kifu kifu/floodgate --engine build/Release/kishi-to.exe \
-      --rounds 5 --games-per-round 500 --epochs 5 --eval-games 20
+  python tools/train_loop.py --kifu kifu/floodgate --engine build/Release/kishi-to.exe
+
+  # Quick test (2 rounds, small scale)
+  python tools/train_loop.py --kifu kifu/floodgate --engine build/Release/kishi-to.exe \
+      --rounds 2 --games-per-round 50 --epochs 2 --eval-games 4 --time-limit 600
+
+  # Full 3-hour run
+  python tools/train_loop.py --kifu kifu/floodgate --engine build/Release/kishi-to.exe \
+      --time-limit 10800
+
+  # Resume after Ctrl-C (just run the same command again)
+  python tools/train_loop.py --kifu kifu/floodgate --engine build/Release/kishi-to.exe
 """
 
 from __future__ import annotations
 
 import argparse
 import shutil
+import signal
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
+_interrupted = False
+
+
+def _on_sigint(sig, frame):
+    global _interrupted
+    if _interrupted:
+        print("\n[!] Force quit", file=sys.stderr, flush=True)
+        sys.exit(1)
+    _interrupted = True
+    print("\n[!] Ctrl-C received. Finishing current step, then stopping...",
+          file=sys.stderr, flush=True)
+
+
 def log(msg: str):
-    print(msg, file=sys.stderr, flush=True)
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", file=sys.stderr, flush=True)
+
+
+def fmt_duration(seconds: float) -> str:
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}h{m:02d}m"
+    return f"{m}m{s:02d}s"
 
 
 def find_existing_versions(models_dir: Path) -> list[int]:
     versions = []
     for f in models_dir.glob("nn_model_v*.pt"):
-        stem = f.stem
         try:
-            v = int(stem.replace("nn_model_v", ""))
+            v = int(f.stem.replace("nn_model_v", ""))
             versions.append(v)
         except ValueError:
             pass
@@ -56,7 +88,6 @@ def run_training(python: str, kifu: str, model_path: str, device: str,
     if resume:
         cmd.append("--resume")
 
-    log(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, stderr=sys.stderr)
     return result.returncode == 0
 
@@ -77,7 +108,6 @@ def run_eval(python: str, engine: str, model1: str, model2: str,
     if device:
         cmd.extend(["--device", device])
 
-    log(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     sys.stderr.write(result.stderr)
 
@@ -86,9 +116,8 @@ def run_eval(python: str, engine: str, model1: str, model2: str,
         return None
 
     summary = result.stdout.strip()
-    parts = summary.split()
     try:
-        pct_str = [p for p in parts if p.endswith("%)")]
+        pct_str = [p for p in summary.split() if p.endswith("%)")]
         win_rate = float(pct_str[0].strip("(%)")) if pct_str else 50.0
     except (IndexError, ValueError):
         win_rate = 50.0
@@ -102,27 +131,36 @@ def append_log(log_path: Path, line: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Versioned training loop")
+    parser = argparse.ArgumentParser(
+        description="Versioned training loop with self-play evaluation")
     parser.add_argument("--kifu", required=True, help="Kifu directory")
     parser.add_argument("--engine", required=True, help="USI engine executable")
-    parser.add_argument("--rounds", type=int, default=10, help="Training rounds")
+    parser.add_argument("--rounds", type=int, default=100,
+                        help="Max training rounds (default: 100)")
+    parser.add_argument("--time-limit", type=int, default=10800,
+                        help="Time limit in seconds (default: 10800 = 3 hours)")
     parser.add_argument("--games-per-round", type=int, default=500,
                         help="Kifu games per round (cumulative)")
-    parser.add_argument("--epochs", type=int, default=5, help="Epochs per round")
+    parser.add_argument("--epochs", type=int, default=5,
+                        help="Epochs per round")
     parser.add_argument("--eval-games", type=int, default=20,
                         help="Self-play games per evaluation")
     parser.add_argument("--movetime", type=int, default=1000,
                         help="Time per move in self-play (ms)")
-    parser.add_argument("--models-dir", default="models", help="Model output directory")
+    parser.add_argument("--models-dir", default="models",
+                        help="Model output directory")
     parser.add_argument("--device", default="auto", help="auto|cuda|cpu")
-    parser.add_argument("--python", default=sys.executable, help="Python interpreter")
+    parser.add_argument("--python", default=sys.executable,
+                        help="Python interpreter (with torch)")
     parser.add_argument("--nn-python", default=None,
-                        help="Python path for engine NNPython option")
+                        help="Python path for engine's NNPython option")
     parser.add_argument("--min-rate", type=int, default=0,
                         help="Minimum player rating filter")
     parser.add_argument("--sample-rate", type=float, default=0.3,
                         help="Middle-game sampling rate")
     args = parser.parse_args()
+
+    signal.signal(signal.SIGINT, _on_sigint)
 
     models_dir = Path(args.models_dir)
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -132,46 +170,89 @@ def main():
     existing = find_existing_versions(models_dir)
     start_version = max(existing) + 1 if existing else 1
 
-    log(f"Starting from version {start_version}, {args.rounds} rounds")
-    log(f"Kifu: {args.kifu}, {args.games_per_round} games/round, {args.epochs} epochs")
-    append_log(log_path, f"\n--- Session started {datetime.now().isoformat()} ---")
+    session_start = time.time()
+    deadline = session_start + args.time_limit
+
+    print(file=sys.stderr)
+    log("=" * 56)
+    log("  KishiTo Training Loop")
+    log("=" * 56)
+    log(f"  Kifu:        {args.kifu}")
+    log(f"  Engine:      {args.engine}")
+    log(f"  Device:      {args.device}")
+    log(f"  Games/round: {args.games_per_round}")
+    log(f"  Epochs:      {args.epochs}")
+    log(f"  Eval games:  {args.eval_games}")
+    log(f"  Time limit:  {fmt_duration(args.time_limit)}")
+    if existing:
+        log(f"  Resuming:    from v{start_version:03d} "
+            f"(found v{existing[0]:03d}..v{existing[-1]:03d})")
+    else:
+        log(f"  Starting:    fresh (v001)")
+    log("=" * 56)
+    print(file=sys.stderr)
+
+    append_log(log_path,
+               f"\n--- Session {datetime.now().strftime('%Y-%m-%d %H:%M')} "
+               f"(limit {fmt_duration(args.time_limit)}) ---")
+
+    rounds_done = 0
 
     for round_idx in range(args.rounds):
+        if _interrupted:
+            log("Interrupted before starting next round.")
+            break
+
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            log(f"Time limit reached ({fmt_duration(args.time_limit)}).")
+            break
+
         version = start_version + round_idx
         total_games = args.games_per_round * version
         version_path = models_dir / f"nn_model_v{version:03d}.pt"
+        elapsed_total = time.time() - session_start
 
-        log(f"\n{'='*50}")
-        log(f"=== Round {round_idx + 1}/{args.rounds} (v{version:03d}) ===")
-        log(f"{'='*50}")
-        log(f"Training with {total_games} games, {args.epochs} epochs...")
+        print(file=sys.stderr)
+        log(f"{'='*56}")
+        log(f"  Round {round_idx + 1} | v{version:03d} | "
+            f"elapsed {fmt_duration(elapsed_total)} | "
+            f"remaining {fmt_duration(remaining)}")
+        log(f"{'='*56}")
 
+        # --- Train ---
+        log(f"Training: {total_games} games, {args.epochs} epochs...")
         t0 = time.time()
         resume = latest_model.exists()
-        train_model = str(latest_model)
 
         ok = run_training(
-            args.python, args.kifu, train_model, args.device,
+            args.python, args.kifu, str(latest_model), args.device,
             total_games, args.epochs, resume,
             args.min_rate, args.sample_rate,
         )
-        elapsed = time.time() - t0
+        train_elapsed = time.time() - t0
+
+        if _interrupted:
+            log("Interrupted during training.")
+            break
 
         if not ok:
-            msg = f"v{version:03d}: Training FAILED after {elapsed:.0f}s"
+            msg = f"v{version:03d}: Training FAILED ({fmt_duration(train_elapsed)})"
             log(msg)
             append_log(log_path, msg)
             continue
 
         shutil.copy2(str(latest_model), str(version_path))
-        log(f"Saved {version_path} ({elapsed:.0f}s)")
-        append_log(log_path, f"v{version:03d}: trained {total_games} games, "
-                             f"{args.epochs} epochs, {elapsed:.0f}s")
+        log(f"Saved {version_path.name} ({fmt_duration(train_elapsed)})")
+        append_log(log_path,
+                   f"v{version:03d}: {total_games} games, {args.epochs} epochs, "
+                   f"{fmt_duration(train_elapsed)}")
 
-        if version >= 2:
+        # --- Self-play vs N-1 ---
+        if version >= 2 and not _interrupted:
             prev_path = models_dir / f"nn_model_v{version - 1:03d}.pt"
             if prev_path.exists():
-                log(f"\nEvaluating v{version:03d} vs v{version - 1:03d} "
+                log(f"Self-play: v{version:03d} vs v{version - 1:03d} "
                     f"({args.eval_games} games)...")
                 result = run_eval(
                     args.python, args.engine,
@@ -180,16 +261,16 @@ def main():
                     args.nn_python,
                 )
                 if result:
-                    improved = result["win_rate"] >= 50.0
-                    mark = "improved" if improved else "WORSE"
-                    log(f"  {result['summary']} -> {mark}")
+                    mark = "+" if result["win_rate"] >= 50.0 else "-"
+                    log(f"  [{mark}] {result['summary']}")
                     append_log(log_path,
-                               f"  vs v{version - 1:03d}: {result['summary']} ({mark})")
+                               f"  vs v{version - 1:03d}: {result['summary']}")
 
-        if version >= 3:
+        # --- Self-play vs N-2 ---
+        if version >= 3 and not _interrupted:
             prev2_path = models_dir / f"nn_model_v{version - 2:03d}.pt"
             if prev2_path.exists():
-                log(f"\nEvaluating v{version:03d} vs v{version - 2:03d} "
+                log(f"Self-play: v{version:03d} vs v{version - 2:03d} "
                     f"({args.eval_games} games)...")
                 result = run_eval(
                     args.python, args.engine,
@@ -198,15 +279,35 @@ def main():
                     args.nn_python,
                 )
                 if result:
-                    improved = result["win_rate"] >= 50.0
-                    mark = "improved" if improved else "WORSE"
-                    log(f"  {result['summary']} -> {mark}")
+                    mark = "+" if result["win_rate"] >= 50.0 else "-"
+                    log(f"  [{mark}] {result['summary']}")
                     append_log(log_path,
-                               f"  vs v{version - 2:03d}: {result['summary']} ({mark})")
+                               f"  vs v{version - 2:03d}: {result['summary']}")
 
-    log(f"\n{'='*50}")
-    log(f"All rounds complete. Latest model: {latest_model}")
-    log(f"Training log: {log_path}")
+        rounds_done += 1
+
+    # --- Summary ---
+    total_elapsed = time.time() - session_start
+    final_versions = find_existing_versions(models_dir)
+    print(file=sys.stderr)
+    log("=" * 56)
+    log("  Training Complete")
+    log("=" * 56)
+    log(f"  Rounds done: {rounds_done}")
+    log(f"  Total time:  {fmt_duration(total_elapsed)}")
+    if final_versions:
+        log(f"  Versions:    v{final_versions[0]:03d} .. v{final_versions[-1]:03d}")
+    log(f"  Latest:      {latest_model}")
+    log(f"  Log:         {log_path}")
+    if _interrupted:
+        log(f"  (interrupted — run again to resume from v{final_versions[-1]+1:03d})"
+            if final_versions else "  (interrupted)")
+    log("=" * 56)
+
+    append_log(log_path,
+               f"--- Session ended {datetime.now().strftime('%Y-%m-%d %H:%M')} "
+               f"({rounds_done} rounds, {fmt_duration(total_elapsed)}) ---")
+
     return 0
 
 

@@ -3,6 +3,10 @@
 #include <array>
 #include <cstdint>
 
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
+
 namespace shogi {
 
 constexpr int BoardSize = 81;
@@ -35,12 +39,47 @@ struct Bitboard {
     bool operator==(const Bitboard& o) const { return lo == o.lo && hi == o.hi; }
     bool operator!=(const Bitboard& o) const { return !(*this == o); }
 
-    int popcount() const;
-    int lsb() const;
-    Bitboard popLsb();
+    inline int popcount() const {
+#if defined(_MSC_VER)
+        return static_cast<int>(__popcnt64(lo)) + static_cast<int>(__popcnt(hi));
+#else
+        return __builtin_popcountll(lo) + __builtin_popcount(hi);
+#endif
+    }
+
+    inline int lsb() const {
+        if (lo != 0) {
+#if defined(_MSC_VER)
+            unsigned long index;
+            _BitScanForward64(&index, lo);
+            return static_cast<int>(index);
+#else
+            return __builtin_ctzll(lo);
+#endif
+        }
+#if defined(_MSC_VER)
+        unsigned long index;
+        _BitScanForward(&index, hi);
+        return static_cast<int>(index) + 64;
+#else
+        return __builtin_ctz(hi) + 64;
+#endif
+    }
+
+    inline Bitboard popLsb();
 };
 
-Bitboard squareBB(int sq);
+inline Bitboard squareBB(int sq) {
+    Bitboard bb;
+    bb.set(sq);
+    return bb;
+}
+
+inline Bitboard Bitboard::popLsb() {
+    const int sq = lsb();
+    clear(sq);
+    return squareBB(sq);
+}
 
 enum Color {
     Black = 1,
@@ -89,22 +128,44 @@ struct Board {
     std::array<Bitboard, PieceTypeCount> pieceBB{}; // 駒種別Bitboard
 };
 
-int idx(int file, int rank);
-int fileOf(int square);
-int rankOf(int square);
-Color opposite(Color color);
-int colorOf(int piece);
-PieceType typeOf(int piece);
-int makePiece(Color color, PieceType type);
-std::array<int, 15>& hand(Board& board, Color color);
-const std::array<int, 15>& hand(const Board& board, Color color);
+inline int idx(int file, int rank) { return (rank - 1) * 9 + (file - 1); }
+inline int fileOf(int square) { return square % 9 + 1; }
+inline int rankOf(int square) { return square / 9 + 1; }
+inline Color opposite(Color color) { return color == Black ? White : Black; }
+inline int colorOf(int piece) { return piece > 0 ? Black : (piece < 0 ? White : 0); }
+
+inline PieceType typeOf(int piece) {
+    return static_cast<PieceType>(piece < 0 ? -piece : piece);
+}
+
+inline int makePiece(Color color, PieceType type) {
+    return static_cast<int>(type) * static_cast<int>(color);
+}
+
+inline std::array<int, 15>& hand(Board& board, Color color) {
+    return color == Black ? board.blackHand : board.whiteHand;
+}
+
+inline const std::array<int, 15>& hand(const Board& board, Color color) {
+    return color == Black ? board.blackHand : board.whiteHand;
+}
+
+inline bool canPromote(PieceType type) {
+    return type >= Pawn && type <= Rook && type != Gold && type != King;
+}
+
+inline bool inPromotionZone(Color color, int rank) {
+    return color == Black ? rank <= 3 : rank >= 7;
+}
+
+inline bool inside(int file, int rank) {
+    return static_cast<unsigned>(file - 1) < 9u && static_cast<unsigned>(rank - 1) < 9u;
+}
+
 PieceType unpromote(PieceType type);
 PieceType promote(PieceType type);
-bool canPromote(PieceType type);
-bool inPromotionZone(Color color, int rank);
 bool mustPromote(Color color, PieceType type, int toRank);
 bool canDropOnRank(Color color, PieceType type, int rank);
-bool inside(int file, int rank);
 
 namespace zobrist {
 void init();

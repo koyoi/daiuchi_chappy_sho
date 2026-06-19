@@ -1,12 +1,7 @@
 #include "shogi_types.h"
 
-#include <cmath>
 #include <cstdint>
 #include <random>
-
-#ifdef _MSC_VER
-#include <intrin.h>
-#endif
 
 namespace shogi {
 
@@ -56,87 +51,6 @@ std::uint64_t sideKey() {
 }
 } // namespace zobrist
 
-int Bitboard::popcount() const {
-#if defined(_MSC_VER)
-    return static_cast<int>(__popcnt64(lo)) + static_cast<int>(__popcnt(hi));
-#else
-    return __builtin_popcountll(lo) + __builtin_popcount(hi);
-#endif
-}
-
-int Bitboard::lsb() const {
-    if (lo != 0) {
-#if defined(_MSC_VER)
-        unsigned long index;
-        _BitScanForward64(&index, lo);
-        return static_cast<int>(index);
-#else
-        return __builtin_ctzll(lo);
-#endif
-    }
-#if defined(_MSC_VER)
-    unsigned long index;
-    _BitScanForward(&index, hi);
-    return static_cast<int>(index) + 64;
-#else
-    return __builtin_ctz(hi) + 64;
-#endif
-}
-
-Bitboard Bitboard::popLsb() {
-    const int sq = lsb();
-    clear(sq);
-    return squareBB(sq);
-}
-
-Bitboard squareBB(int sq) {
-    Bitboard bb;
-    bb.set(sq);
-    return bb;
-}
-
-int idx(int file, int rank) {
-    return (rank - 1) * 9 + (file - 1);
-}
-
-int fileOf(int square) {
-    return square % 9 + 1;
-}
-
-int rankOf(int square) {
-    return square / 9 + 1;
-}
-
-Color opposite(Color color) {
-    return color == Black ? White : Black;
-}
-
-int colorOf(int piece) {
-    if (piece > 0) {
-        return Black;
-    }
-    if (piece < 0) {
-        return White;
-    }
-    return 0;
-}
-
-PieceType typeOf(int piece) {
-    return static_cast<PieceType>(std::abs(piece));
-}
-
-int makePiece(Color color, PieceType type) {
-    return static_cast<int>(type) * static_cast<int>(color);
-}
-
-std::array<int, 15>& hand(Board& board, Color color) {
-    return color == Black ? board.blackHand : board.whiteHand;
-}
-
-const std::array<int, 15>& hand(const Board& board, Color color) {
-    return color == Black ? board.blackHand : board.whiteHand;
-}
-
 PieceType unpromote(PieceType type) {
     switch (type) {
     case ProPawn:
@@ -175,14 +89,6 @@ PieceType promote(PieceType type) {
     }
 }
 
-bool canPromote(PieceType type) {
-    return type == Pawn || type == Lance || type == Knight || type == Silver || type == Bishop || type == Rook;
-}
-
-bool inPromotionZone(Color color, int rank) {
-    return color == Black ? rank <= 3 : rank >= 7;
-}
-
 bool mustPromote(Color color, PieceType type, int toRank) {
     if (type == Pawn || type == Lance) {
         return color == Black ? toRank == 1 : toRank == 9;
@@ -201,10 +107,6 @@ bool canDropOnRank(Color color, PieceType type, int rank) {
         return !(color == Black ? rank <= 2 : rank >= 8);
     }
     return true;
-}
-
-bool inside(int file, int rank) {
-    return file >= 1 && file <= 9 && rank >= 1 && rank <= 9;
 }
 
 void initKingSquares(Board& board) {

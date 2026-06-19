@@ -281,6 +281,7 @@ std::vector<Move> generatePseudoMoves(const Board& board) {
     initAttackTables();
     initFileMasks();
     std::vector<Move> moves;
+    moves.reserve(128);
     const Color color = board.side;
     const int ci = color == Black ? 0 : 1;
     const Bitboard ownPieces = board.occupied[ci];
@@ -425,6 +426,7 @@ bool isKingAttacked(const Board& board, Color color) {
 
 std::vector<Move> generateLegalMoves(const Board& board, bool enforcePawnDropMate) {
     std::vector<Move> legal;
+    legal.reserve(128);
     for (const Move& move : generatePseudoMoves(board)) {
         Board next = board;
         const Color mover = board.side;
