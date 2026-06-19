@@ -66,14 +66,24 @@ class ShogiTransformerModel:
 
     def __new__(cls, nn, d_model, nhead, num_layers, dim_ff):
         import torch
+        import torch.nn.functional as F
 
         class _Model(nn.Module):
             def __init__(self):
                 super().__init__()
+                self.d_model = d_model
                 self.piece_embed = nn.Embedding(VOCAB_SIZE, d_model)
-                self.pos_embed = nn.Embedding(SEQ_LEN, d_model)
+                self.file_embed = nn.Embedding(9, d_model)
+                self.rank_embed = nn.Embedding(9, d_model)
+                self.hand_pos_embed = nn.Embedding(2 * HAND_TYPES, d_model)
                 self.hand_count_embed = nn.Embedding(HAND_MAX + 1, d_model)
                 self.side_embed = nn.Embedding(2, d_model)
+
+                self.cnn = nn.Sequential(
+                    nn.Conv2d(d_model, d_model, 3, padding=1),
+                    nn.ReLU(),
+                    nn.Conv2d(d_model, d_model, 3, padding=1),
+                )
 
                 encoder_layer = nn.TransformerEncoderLayer(
                     d_model=d_model, nhead=nhead, dim_feedforward=dim_ff,
@@ -95,30 +105,35 @@ class ShogiTransformerModel:
                 )
 
             def forward(self, board_tokens, hand_tokens, side_token):
-                # board_tokens: (B, 81) int
-                # hand_tokens:  (B, 14) int (counts, clamped to [0, HAND_MAX])
-                # side_token:   (B,) int
                 B = board_tokens.shape[0]
+                dev = board_tokens.device
+                d = self.d_model
 
-                pos_ids = torch.arange(SEQ_LEN, device=board_tokens.device).unsqueeze(0).expand(B, -1)
+                board_emb = self.piece_embed(board_tokens)
+                files = torch.arange(BOARD_SQUARES, device=dev) % 9
+                ranks = torch.arange(BOARD_SQUARES, device=dev) // 9
+                board_emb = board_emb + self.file_embed(files) + self.rank_embed(ranks)
 
-                board_emb = self.piece_embed(board_tokens)    # (B, 81, d)
-                hand_emb = self.hand_count_embed(hand_tokens) # (B, 14, d)
-                seq = torch.cat([board_emb, hand_emb], dim=1) # (B, 95, d)
-                seq = seq + self.pos_embed(pos_ids)
+                residual = board_emb
+                x = board_emb.transpose(1, 2).reshape(B, d, 9, 9)
+                x = self.cnn(x)
+                x = x.reshape(B, d, BOARD_SQUARES).transpose(1, 2)
+                board_emb = F.relu(x + residual)
 
-                side_emb = self.side_embed(side_token).unsqueeze(1) # (B, 1, d)
-                seq = seq + side_emb
+                hand_emb = self.hand_count_embed(hand_tokens)
+                hand_ids = torch.arange(2 * HAND_TYPES, device=dev)
+                hand_emb = hand_emb + self.hand_pos_embed(hand_ids)
 
-                out = self.transformer(seq) # (B, 95, d)
+                seq = torch.cat([board_emb, hand_emb], dim=1)
+                seq = seq + self.side_embed(side_token).unsqueeze(1)
 
-                # Value: global average pool
-                global_repr = out.mean(dim=1) # (B, d)
-                value = self.value_head(global_repr).squeeze(-1) # (B,)
+                out = self.transformer(seq)
 
-                # Policy: use board square outputs only
-                board_out = out[:, :BOARD_SQUARES, :].reshape(B, -1) # (B, 81*d)
-                policy_logits = self.policy_head(board_out) # (B, POLICY_SIZE)
+                global_repr = out.mean(dim=1)
+                value = self.value_head(global_repr).squeeze(-1)
+
+                board_out = out[:, :BOARD_SQUARES, :].reshape(B, -1)
+                policy_logits = self.policy_head(board_out)
 
                 return value, policy_logits
 

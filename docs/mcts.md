@@ -37,18 +37,25 @@ MCTS エンジン (`kishi-to`) が使用するモンテカルロ木探索と Tra
 ### アーキテクチャ
 
 ```text
-盤面81マス → piece_embed(29, 128)  ──┐
-持ち駒14枠 → hand_count_embed(20, 128) ─┤→ concat → + pos_embed(95, 128) + side_embed
-                                         ↓
-                              TransformerEncoder (4層, 8ヘッド, FFN=256)
-                                    ↓              ↓
-                              mean pool         board部分(81×128)
-                                 ↓                    ↓
-                         value_head           policy_head
-                         128→64→1→Tanh       81×128→512→2187
+盤面81マス → piece_embed(29, 128) + file_embed(9, 128) + rank_embed(9, 128)
+                ↓
+          CNN前段 (Conv2d 3×3 × 2層 + 残差接続)
+                ↓
+持ち駒14枠 → hand_count_embed(20, 128) + hand_pos_embed(14, 128)
+                ↓
+          concat(board 81, hand 14) + side_embed(2, 128)
+                ↓
+          TransformerEncoder (4層, 8ヘッド, FFN=256)
+              ↓              ↓
+          mean pool      board部分(81×128)
+             ↓                ↓
+       value_head       policy_head
+       128→64→1→Tanh   81×128→512→2187
 ```
 
-- **パラメータ数**: 約 700 万
+- **CNN前段**: 9×9 盤面を画像として畳み込み、利き・紐付き等の局所パターンを自動検出
+- **2D位置エンコーディング**: 筋 (file) と段 (rank) を分離した埋め込みで盤面の空間構造を明示
+- **パラメータ数**: 約 740 万
 - **value**: -1.0 (負け) 〜 +1.0 (勝ち) の評価値
 - **policy**: 2187 次元 = 81 マス × 27 チャンネル
 

@@ -44,14 +44,23 @@ def pick_device(torch_mod, requested: str):
 def build_model(nn, d_model=128, nhead=8, num_layers=4, dim_ff=256):
     """Build ShogiTransformer (same as nn_eval.py)."""
     import torch
+    import torch.nn.functional as F
 
     class ShogiTransformerModel(nn.Module):
         def __init__(self):
             super().__init__()
+            self.d_model = d_model
             self.piece_embed = nn.Embedding(VOCAB_SIZE, d_model)
-            self.pos_embed = nn.Embedding(SEQ_LEN, d_model)
+            self.file_embed = nn.Embedding(9, d_model)
+            self.rank_embed = nn.Embedding(9, d_model)
+            self.hand_pos_embed = nn.Embedding(2 * HAND_TYPES, d_model)
             self.hand_count_embed = nn.Embedding(HAND_MAX + 1, d_model)
             self.side_embed = nn.Embedding(2, d_model)
+            self.cnn = nn.Sequential(
+                nn.Conv2d(d_model, d_model, 3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(d_model, d_model, 3, padding=1),
+            )
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=d_model, nhead=nhead, dim_feedforward=dim_ff,
                 batch_first=True, dropout=0.1,
@@ -66,13 +75,27 @@ def build_model(nn, d_model=128, nhead=8, num_layers=4, dim_ff=256):
 
         def forward(self, board_tokens, hand_tokens, side_token):
             B = board_tokens.shape[0]
-            pos_ids = torch.arange(SEQ_LEN, device=board_tokens.device).unsqueeze(0).expand(B, -1)
+            dev = board_tokens.device
+            d = self.d_model
+
             board_emb = self.piece_embed(board_tokens)
+            files = torch.arange(BOARD_SQUARES, device=dev) % 9
+            ranks = torch.arange(BOARD_SQUARES, device=dev) // 9
+            board_emb = board_emb + self.file_embed(files) + self.rank_embed(ranks)
+
+            residual = board_emb
+            x = board_emb.transpose(1, 2).reshape(B, d, 9, 9)
+            x = self.cnn(x)
+            x = x.reshape(B, d, BOARD_SQUARES).transpose(1, 2)
+            board_emb = F.relu(x + residual)
+
             hand_emb = self.hand_count_embed(hand_tokens)
+            hand_ids = torch.arange(2 * HAND_TYPES, device=dev)
+            hand_emb = hand_emb + self.hand_pos_embed(hand_ids)
+
             seq = torch.cat([board_emb, hand_emb], dim=1)
-            seq = seq + self.pos_embed(pos_ids)
-            side_emb = self.side_embed(side_token).unsqueeze(1)
-            seq = seq + side_emb
+            seq = seq + self.side_embed(side_token).unsqueeze(1)
+
             out = self.transformer(seq)
             global_repr = out.mean(dim=1)
             value = self.value_head(global_repr).squeeze(-1)
