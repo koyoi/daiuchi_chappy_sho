@@ -173,12 +173,25 @@ def load_model(model_path, torch_mod, nn, device, require_exists=True):
 
 # ---------- Serve mode ----------
 
+def _log(msg):
+    print(f"[NN] {msg}", file=sys.stderr, flush=True)
+
+
 def serve(args):
     torch_mod, nn = import_torch()
     device = pick_device(torch_mod, args.device)
     model_path = Path(args.model)
+    _log(f"Device: {device}")
+
     model = load_model(model_path, torch_mod, nn, device, require_exists=False)
     model.eval()
+    params = sum(p.numel() for p in model.parameters())
+    if model_path.exists():
+        _log(f"Model loaded: {model_path} ({params:,} params)")
+    else:
+        _log(f"No model file at {model_path}, using random weights ({params:,} params)")
+
+    eval_count = 0
 
     sys.stdout.write("ready\n")
     sys.stdout.flush()
@@ -189,6 +202,7 @@ def serve(args):
             continue
 
         if line == "quit":
+            _log(f"Shutting down (evaluated {eval_count} positions total)")
             break
 
         if line.startswith("eval "):
@@ -202,9 +216,13 @@ def serve(args):
                 p = softmax(policy_logits[0].cpu().tolist())
                 out_parts = [f"{v:.6f}"] + [f"{x:.6f}" for x in p]
                 sys.stdout.write(" ".join(out_parts) + "\n")
+                eval_count += 1
             except Exception as e:
+                _log(f"Error in eval: {e}")
                 sys.stdout.write(f"0.0 " + " ".join(["0.000460"] * POLICY_SIZE) + "\n")
             sys.stdout.flush()
+            if eval_count % 100 == 0:
+                _log(f"Evaluated {eval_count} positions")
 
         elif line.startswith("batch "):
             parts = line[6:].split("|")
@@ -226,7 +244,11 @@ def serve(args):
                     out_parts = [f"{v:.6f}"] + [f"{x:.6f}" for x in p]
                     sys.stdout.write(" ".join(out_parts) + "\n")
                 sys.stdout.flush()
-            except Exception:
+                eval_count += n
+                if eval_count % 100 < n:
+                    _log(f"Evaluated {eval_count} positions")
+            except Exception as e:
+                _log(f"Error in batch: {e}")
                 for _ in range(n if 'n' in dir() else 1):
                     sys.stdout.write(f"0.0 " + " ".join(["0.000460"] * POLICY_SIZE) + "\n")
                 sys.stdout.flush()
@@ -235,10 +257,13 @@ def serve(args):
             parts = line[6:].strip().split()
             data_path = parts[0]
             epochs = int(parts[1]) if len(parts) > 1 else 10
+            _log(f"Training from {data_path} for {epochs} epochs")
             try:
                 _train_from_file(model, data_path, epochs, torch_mod, nn, device, model_path)
+                _log(f"Training complete, model saved to {model_path}")
                 sys.stdout.write("ok\n")
             except Exception as e:
+                _log(f"Training error: {e}")
                 sys.stdout.write(f"error {e}\n")
             sys.stdout.flush()
 
