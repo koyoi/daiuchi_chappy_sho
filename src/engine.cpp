@@ -24,13 +24,12 @@ namespace shogi {
 
 namespace {
 
-constexpr int MateScore = 100000;      // 詰みの評価値（評価関数の範囲±30000と重ならない値）
-constexpr int QuiescenceDepth = 2;     // 静止探索の最大深さ
-constexpr int ExactScore = 0;          // 置換表: 正確な評価値
-constexpr int LowerBound = 1;          // 置換表: 下界（βカット発生）
-constexpr int UpperBound = 2;          // 置換表: 上界（αカット発生）
+constexpr int MateScore = 100000;
+constexpr int QuiescenceDepth = 2;
+constexpr int ExactScore = 0;
+constexpr int LowerBound = 1;
+constexpr int UpperBound = 2;
 
-// 駒種ごとの静的な価値（歩=100基準）
 int pieceValue(PieceType type) {
     switch (type) {
     case Pawn: return 100;
@@ -91,8 +90,6 @@ int chebyshevDistance(int left, int right) {
     return std::max(std::abs(fileOf(left) - fileOf(right)), std::abs(rankOf(left) - rankOf(right)));
 }
 
-// 序盤の安全性ペナルティの強さを手数に応じて減衰させる (0〜100%)
-// 24手目までは100%適用、56手目以降は無効
 int openingSafetyScale(int moveNumber) {
     if (moveNumber >= 56) {
         return 0;
@@ -103,7 +100,6 @@ int openingSafetyScale(int moveNumber) {
     return std::max(0, (56 - moveNumber) * 100 / 32);
 }
 
-// 成ることで得られる駒価値の増分
 int promotionGain(PieceType type) {
     if (!canPromote(type)) {
         return 0;
@@ -111,8 +107,6 @@ int promotionGain(PieceType type) {
     return std::max(0, pieceValue(promote(type)) - pieceValue(type));
 }
 
-// 自陣の駒が相手に取られやすい状態にあるかを評価するペナルティ
-// 利きの数で攻め駒と守り駒のバランスを見る
 int vulnerablePiecePenalty(const Board& board, Color side) {
     int penalty = 0;
     const Color enemy = opposite(side);
@@ -140,7 +134,6 @@ int vulnerablePiecePenalty(const Board& board, Color side) {
     return penalty;
 }
 
-// 玉の周囲8マス+玉自身への相手の利きを数え、玉の危険度を評価
 int kingExposurePenalty(const Board& board, Color side) {
     const int king = findKing(board, side);
     if (king < 0) {
@@ -165,14 +158,13 @@ int kingExposurePenalty(const Board& board, Color side) {
     return penalty;
 }
 
-// 相手の次の一手でどれだけ脅威があるかを評価
-// 駒取り・成り・玉への接近・王手・詰みの可能性を総合的にスコア化
 int opponentImmediateThreatScore(const Board& board, Color targetSide) {
     if (board.side == targetSide) {
         return 0;
     }
     const int king = findKing(board, targetSide);
     const auto replies = generateLegalMoves(board, true);
+    Board temp = board;
     int best = 0;
     int accumulated = 0;
     int checks = 0;
@@ -197,15 +189,17 @@ int opponentImmediateThreatScore(const Board& board, Color targetSide) {
             }
         }
 
-        Board next = board;
-        applyMove(next, reply);
-        if (isKingAttacked(next, targetSide)) {
+        UndoInfo undo;
+        applyMove(temp, reply, undo);
+        if (isKingAttacked(temp, targetSide)) {
             score += 1100;
             ++checks;
-            if (generateLegalMoves(next, true).empty()) {
+            if (generateLegalMoves(temp, true).empty()) {
+                undoMove(temp, reply, undo);
                 return MateScore;
             }
         }
+        undoMove(temp, reply, undo);
 
         if (score > 0) {
             best = std::max(best, score);
@@ -215,8 +209,6 @@ int opponentImmediateThreatScore(const Board& board, Color targetSide) {
     return best + accumulated + checks * 160;
 }
 
-// 序盤で危険な手（相手の脅威を招く手）にペナルティを与える
-// 脅威スコア・駒の取られやすさ・玉の露出度を手数に応じた重みで合算
 int openingTrapPenalty(const Board& before, const Move& move, Color side) {
     const int scale = openingSafetyScale(before.moveNumber);
     if (scale <= 0) {
@@ -249,22 +241,16 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits) 
     return chooseMove(board, limits, InfoCallback{});
 }
 
-// 指し手選択のメイン関数
-// 反復深化(iterative deepening)で探索深さを1から順に深くし、
-// 制限時間内で最も良い手を選ぶ
 Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, const InfoCallback& infoCallback) {
-    // 探索状態の初期化
     const auto searchStart = std::chrono::steady_clock::now();
     stopped_.store(false);
     nodes_.store(0);
     ++ttGeneration_;
-    // 持ち時間の設定（50ms〜600秒にクランプ）
     const int requestedMoveTime = limits.moveTimeMs > 0 ? limits.moveTimeMs : maxMoveTimeMs_;
     const int moveTime = std::clamp(requestedMoveTime, 50, 600000);
     deadline_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(moveTime);
 
-    // 合法手がなければ投了（指し手なし）
-    const auto legal = generateLegalMoves(board, true);
+    auto legal = generateLegalMoves(board, true);
     if (legal.empty()) {
         SearchInfo info;
         info.depth = 0;
@@ -274,7 +260,6 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
         return Move{};
     }
 
-    // GPU評価が利用可能ならそちらで選択（ニューラルネット推論）
     Move gpuMove;
     if (chooseMoveByGpu(board, legal, gpuMove)) {
         SearchInfo info;
@@ -287,37 +272,31 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
         return gpuMove;
     }
 
-    // 合法手を有望な順に並べ替え（探索効率のため）
     const Color rootSide = board.side;
-    const std::vector<Move> orderedMoves = orderMoves(board, legal, rootSide);
+    orderMoves(board, legal, rootSide);
 
-    // 序盤の安全性ペナルティを各手に対して事前計算
-    std::vector<int> openingPenalties(orderedMoves.size(), 0);
+    std::vector<int> openingPenalties(legal.size(), 0);
     if (openingSafety_) {
-        for (std::size_t i = 0; i < orderedMoves.size(); ++i) {
-            openingPenalties[i] = openingTrapPenalty(board, orderedMoves[i], rootSide);
+        for (int i = 0; i < legal.size(); ++i) {
+            openingPenalties[i] = openingTrapPenalty(board, legal[i], rootSide);
         }
     }
 
-    // 反復深化ループ: 深さ1から順に探索し、時間切れまで繰り返す
     int completedDepth = 0;
     int bestScore = std::numeric_limits<int>::min();
     std::vector<Move> bestMoves;
     const int maxDepth = depthLimit();
     for (int depth = 1; depth <= maxDepth && !shouldStop(); ++depth) {
         const std::uint64_t nodesBeforeDepth = nodes_.load();
-        // この深さで全ルート手を並列評価
-        const std::vector<int> scores = scoreRootMovesParallel(board, orderedMoves, openingPenalties, rootSide, depth, searchStart, infoCallback);
+        const std::vector<int> scores = scoreRootMovesParallel(board, legal, openingPenalties, rootSide, depth, searchStart, infoCallback);
 
-        // 時間切れでノードを1つも探索できなかったら、この深さの結果は破棄
         if (shouldStop() && nodes_.load() == nodesBeforeDepth) {
             break;
         }
 
-        // この深さでの最善手を選出（同点なら複数保持）
         int depthBestScore = std::numeric_limits<int>::min();
         std::vector<Move> depthBestMoves;
-        for (std::size_t i = 0; i < orderedMoves.size(); ++i) {
+        for (int i = 0; i < legal.size(); ++i) {
             const int score = scores[i];
             if (score == std::numeric_limits<int>::min()) {
                 continue;
@@ -325,12 +304,11 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
             if (score > depthBestScore) {
                 depthBestScore = score;
                 depthBestMoves.clear();
-                depthBestMoves.push_back(orderedMoves[i]);
+                depthBestMoves.push_back(legal[i]);
             } else if (score == depthBestScore) {
-                depthBestMoves.push_back(orderedMoves[i]);
+                depthBestMoves.push_back(legal[i]);
             }
         }
-        // 探索が完了した深さの結果で最善手を更新
         if (!depthBestMoves.empty()) {
             completedDepth = depth;
             bestScore = depthBestScore;
@@ -342,7 +320,6 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
             info.timeMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - searchStart).count());
             info.bestMove = bestMoves.front();
             info.hasBestMove = true;
-            // PV構築: ルート最善手 + TTから後続手順を復元
             info.pv.push_back(bestMoves.front());
             Board pvBoard = board;
             applyMove(pvBoard, bestMoves.front());
@@ -355,7 +332,6 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
         }
     }
 
-    // 最善手が同点で複数あればランダムに1つ選択
     if (bestMoves.empty()) {
         bestMoves.push_back(legal.front());
     }
@@ -455,9 +431,7 @@ SearchInfo LearningEngine::lastSearchInfo() const {
     return lastSearchInfo_;
 }
 
-// GPU(ニューラルネット)による手の選択
-// 全合法手の局面特徴量を抽出してGPUでスコアリングし、最善手を選ぶ
-bool LearningEngine::chooseMoveByGpu(const Board& board, const std::vector<Move>& legal, Move& selected) {
+bool LearningEngine::chooseMoveByGpu(const Board& board, const MoveList& legal, Move& selected) {
     std::vector<FeatureVector> features;
     features.reserve(legal.size());
     for (const Move& move : legal) {
@@ -473,7 +447,7 @@ bool LearningEngine::chooseMoveByGpu(const Board& board, const std::vector<Move>
 
     int bestScore = std::numeric_limits<int>::min();
     std::vector<Move> bestMoves;
-    for (std::size_t i = 0; i < legal.size(); ++i) {
+    for (int i = 0; i < legal.size(); ++i) {
         const int adjustedScore = scores[i] - (openingSafety_ ? openingTrapPenalty(board, legal[i], board.side) : 0);
         if (adjustedScore > bestScore) {
             bestScore = adjustedScore;
@@ -491,16 +465,12 @@ bool LearningEngine::chooseMoveByGpu(const Board& board, const std::vector<Move>
     return true;
 }
 
-// αβ探索 (minimax + αβ枝刈り)
-// rootSide視点のスコアを返す。自分の手番ではmax、相手の手番ではmin。
-// 置換表を使って同一局面の再探索を回避する。
-int LearningEngine::search(Board board, int depth, int alpha, int beta, Color rootSide) const {
+int LearningEngine::search(Board& board, int depth, int alpha, int beta, Color rootSide) const {
     nodes_.fetch_add(1);
     if (shouldStop()) {
         return evaluator_.evaluate(board, rootSide);
     }
 
-    // 置換表の参照: 以前に同じ局面をより深く探索済みならその結果を再利用
     const int alphaOriginal = alpha;
     const int betaOriginal = beta;
     const std::uint64_t key = boardHash(board, rootSide);
@@ -524,39 +494,37 @@ int LearningEngine::search(Board board, int depth, int alpha, int beta, Color ro
         }
     }
 
-    // 終端ノード: 合法手なし → 詰み or ステイルメイト
-    const auto legal = generateLegalMoves(board, true);
+    auto legal = generateLegalMoves(board, true);
     if (legal.empty()) {
         if (isKingAttacked(board, board.side)) {
-            // 詰まされた側が自分なら大きなマイナス、相手なら大きなプラス
             return board.side == rootSide ? -MateScore - depth : MateScore + depth;
         }
         return 0;
     }
 
-    // 深さ0に達したら静止探索へ移行（駒取りなど激しい変化を読み切る）
     if (depth <= 0) {
         return quiescence(board, QuiescenceDepth, alpha, beta, rootSide);
     }
 
-    // 自分の手番: スコアを最大化 (max node)
+    orderMoves(board, legal, rootSide);
+
     if (board.side == rootSide) {
         int best = std::numeric_limits<int>::min();
         Move bestMoveLocal{};
-        for (const Move& move : orderMoves(board, legal, rootSide)) {
-            Board next = board;
-            applyMove(next, move);
-            const int val = search(next, depth - 1, alpha, beta, rootSide);
+        for (const Move& move : legal) {
+            UndoInfo undo;
+            applyMove(board, move, undo);
+            const int val = search(board, depth - 1, alpha, beta, rootSide);
+            undoMove(board, move, undo);
             if (val > best) {
                 best = val;
                 bestMoveLocal = move;
             }
             alpha = std::max(alpha, best);
             if (alpha >= beta) {
-                break; // βカット: これ以上探索しても相手が許さない
+                break;
             }
         }
-        // 探索結果を置換表に保存
         {
             std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
             TranspositionEntry& slot = transposition_[ttIndex];
@@ -572,20 +540,20 @@ int LearningEngine::search(Board board, int depth, int alpha, int beta, Color ro
         return best;
     }
 
-    // 相手の手番: スコアを最小化 (min node)
     int best = std::numeric_limits<int>::max();
     Move bestMoveLocal{};
-    for (const Move& move : orderMoves(board, legal, rootSide)) {
-        Board next = board;
-        applyMove(next, move);
-        const int val = search(next, depth - 1, alpha, beta, rootSide);
+    for (const Move& move : legal) {
+        UndoInfo undo;
+        applyMove(board, move, undo);
+        const int val = search(board, depth - 1, alpha, beta, rootSide);
+        undoMove(board, move, undo);
         if (val < best) {
             best = val;
             bestMoveLocal = move;
         }
         beta = std::min(beta, best);
         if (alpha >= beta) {
-            break; // αカット: これ以上探索しても自分に有利にならない
+            break;
         }
     }
     {
@@ -603,16 +571,13 @@ int LearningEngine::search(Board board, int depth, int alpha, int beta, Color ro
     return best;
 }
 
-// 静止探索 (quiescence search)
-// 通常探索の葉ノードで、駒取り・成り・王手などの激しい手だけを追加で読む。
-// 「水平線効果」を緩和し、駒交換の途中で評価が切れることを防ぐ。
-int LearningEngine::quiescence(Board board, int depth, int alpha, int beta, Color rootSide) const {
+int LearningEngine::quiescence(Board& board, int depth, int alpha, int beta, Color rootSide) const {
     nodes_.fetch_add(1);
     if (shouldStop()) {
         return evaluator_.evaluate(board, rootSide);
     }
 
-    const auto legal = generateLegalMoves(board, true);
+    auto legal = generateLegalMoves(board, true);
     if (legal.empty()) {
         if (isKingAttacked(board, board.side)) {
             return board.side == rootSide ? -MateScore - depth : MateScore + depth;
@@ -620,7 +585,6 @@ int LearningEngine::quiescence(Board board, int depth, int alpha, int beta, Colo
         return 0;
     }
 
-    // stand pat: 何もしない場合の現局面の評価値
     int standPat = evaluator_.evaluate(board, rootSide);
     if (depth <= 0) {
         return standPat;
@@ -629,21 +593,22 @@ int LearningEngine::quiescence(Board board, int depth, int alpha, int beta, Colo
     const bool maximizing = board.side == rootSide;
     const bool inCheck = isKingAttacked(board, board.side);
 
-    // 自分の手番: stand patがβ以上なら枝刈り（十分良い局面）
+    orderMoves(board, legal, rootSide);
+
     if (maximizing) {
         if (standPat >= beta) {
             return standPat;
         }
         alpha = std::max(alpha, standPat);
         int best = standPat;
-        for (const Move& move : orderMoves(board, legal, rootSide)) {
-            // 王手がかかっていなければ、戦術的な手(駒取り・成り・王手)のみ探索
+        for (const Move& move : legal) {
             if (!inCheck && !isTacticalMove(board, move)) {
                 continue;
             }
-            Board next = board;
-            applyMove(next, move);
-            best = std::max(best, quiescence(next, depth - 1, alpha, beta, rootSide));
+            UndoInfo undo;
+            applyMove(board, move, undo);
+            best = std::max(best, quiescence(board, depth - 1, alpha, beta, rootSide));
+            undoMove(board, move, undo);
             alpha = std::max(alpha, best);
             if (alpha >= beta) {
                 break;
@@ -652,19 +617,19 @@ int LearningEngine::quiescence(Board board, int depth, int alpha, int beta, Colo
         return best;
     }
 
-    // 相手の手番: stand patがα以下なら枝刈り
     if (standPat <= alpha) {
         return standPat;
     }
     beta = std::min(beta, standPat);
     int best = standPat;
-    for (const Move& move : orderMoves(board, legal, rootSide)) {
+    for (const Move& move : legal) {
         if (!inCheck && !isTacticalMove(board, move)) {
             continue;
         }
-        Board next = board;
-        applyMove(next, move);
-        best = std::min(best, quiescence(next, depth - 1, alpha, beta, rootSide));
+        UndoInfo undo;
+        applyMove(board, move, undo);
+        best = std::min(best, quiescence(board, depth - 1, alpha, beta, rootSide));
+        undoMove(board, move, undo);
         beta = std::min(beta, best);
         if (alpha >= beta) {
             break;
@@ -673,14 +638,12 @@ int LearningEngine::quiescence(Board board, int depth, int alpha, int beta, Colo
     return best;
 }
 
-// 詰み探索: attacker側が強制的に詰ませられるかを判定
-// 攻め方はどれか1手で詰みに至ればtrue、受け方は全ての応手で詰まなければfalse
-bool LearningEngine::canForceMate(Board board, int depth, Color attacker) const {
+bool LearningEngine::canForceMate(Board& board, int depth, Color attacker) const {
     nodes_.fetch_add(1);
     if (shouldStop()) {
         return false;
     }
-    const auto legal = generateLegalMoves(board, true);
+    auto legal = generateLegalMoves(board, true);
     if (legal.empty()) {
         return isKingAttacked(board, board.side) && board.side != attacker;
     }
@@ -688,29 +651,33 @@ bool LearningEngine::canForceMate(Board board, int depth, Color attacker) const 
         return false;
     }
 
+    orderMoves(board, legal, attacker);
+
     if (board.side == attacker) {
-        for (const Move& move : orderMoves(board, legal, attacker)) {
-            Board next = board;
-            applyMove(next, move);
-            if (canForceMate(next, depth - 1, attacker)) {
+        for (const Move& move : legal) {
+            UndoInfo undo;
+            applyMove(board, move, undo);
+            const bool mate = canForceMate(board, depth - 1, attacker);
+            undoMove(board, move, undo);
+            if (mate) {
                 return true;
             }
         }
         return false;
     }
 
-    for (const Move& move : orderMoves(board, legal, attacker)) {
-        Board next = board;
-        applyMove(next, move);
-        if (!canForceMate(next, depth - 1, attacker)) {
+    for (const Move& move : legal) {
+        UndoInfo undo;
+        applyMove(board, move, undo);
+        const bool mate = canForceMate(board, depth - 1, attacker);
+        undoMove(board, move, undo);
+        if (!mate) {
             return false;
         }
     }
     return true;
 }
 
-// 戦術的な手かどうかを判定（駒取り・成り・王手のいずれか）
-// 静止探索で読む手を絞り込むために使う
 bool LearningEngine::isTacticalMove(const Board& board, const Move& move) const {
     if (!move.isDrop() && board.squares[move.to] != 0) {
         return true;
@@ -718,17 +685,12 @@ bool LearningEngine::isTacticalMove(const Board& board, const Move& move) const 
     if (move.promote) {
         return true;
     }
-    Board next = board;
-    applyMove(next, move);
-    return isKingAttacked(next, next.side);
+    return givesCheck(board, move);
 }
 
-// ルートの全合法手を並列に評価する
-// 各手に対してsearch()を呼び、序盤ペナルティを差し引いたスコアを返す
-// マルチスレッド対応: ワーカースレッドが手を1つずつ取り出して探索
 std::vector<int> LearningEngine::scoreRootMovesParallel(
     const Board& board,
-    const std::vector<Move>& orderedMoves,
+    const MoveList& orderedMoves,
     const std::vector<int>& openingPenalties,
     Color rootSide,
     int depth,
@@ -746,8 +708,7 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
     bool hasBestMove = false;
     auto lastEmit = searchStart - std::chrono::milliseconds(1000);
 
-    // 探索途中の情報(現在の最善手・ノード数等)をコールバックで通知
-    auto publish = [&](std::size_t index, int score, bool force) {
+    auto publish = [&](int index, int score, bool force) {
         SearchInfo info;
         bool shouldEmit = false;
         Move currentBest;
@@ -782,16 +743,16 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
         }
     };
 
-    const int workerCount = std::min<int>(std::max(1, threads_), static_cast<int>(orderedMoves.size()));
+    const int workerCount = std::min<int>(std::max(1, threads_), orderedMoves.size());
     if (workerCount <= 1) {
-        for (std::size_t i = 0; i < orderedMoves.size(); ++i) {
+        for (int i = 0; i < orderedMoves.size(); ++i) {
             if (shouldStop()) {
                 break;
             }
             Board next = board;
             applyMove(next, orderedMoves[i]);
             scores[i] = search(next, depth - 1, -MateScore, MateScore, rootSide);
-            if (i < openingPenalties.size()) {
+            if (i < static_cast<int>(openingPenalties.size())) {
                 scores[i] -= openingPenalties[i];
             }
             publish(i, scores[i], i + 1 == orderedMoves.size());
@@ -799,20 +760,20 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
         return scores;
     }
 
-    std::atomic_size_t nextIndex{0};
+    std::atomic_int nextIndex{0};
     std::vector<std::thread> workers;
     workers.reserve(workerCount);
     for (int worker = 0; worker < workerCount; ++worker) {
         workers.emplace_back([&, rootSide]() {
             while (!shouldStop()) {
-                const std::size_t index = nextIndex.fetch_add(1);
+                const int index = nextIndex.fetch_add(1);
                 if (index >= orderedMoves.size()) {
                     break;
                 }
                 Board next = board;
                 applyMove(next, orderedMoves[index]);
                 scores[index] = search(next, depth - 1, -MateScore, MateScore, rootSide);
-                if (index < openingPenalties.size()) {
+                if (index < static_cast<int>(openingPenalties.size())) {
                     scores[index] -= openingPenalties[index];
                 }
                 publish(index, scores[index], index + 1 == orderedMoves.size());
@@ -827,36 +788,27 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
     return scores;
 }
 
-// 手の並べ替え (move ordering)
-// αβ枝刈りの効率を上げるため、有望な手を先に探索する
-// 駒取り > 王手 > 成り > 駒打ち の順に高いスコアを付与
-std::vector<Move> LearningEngine::orderMoves(const Board& board, const std::vector<Move>& moves, Color rootSide) const {
+void LearningEngine::orderMoves(const Board& board, MoveList& moves, Color rootSide) const {
     struct ScoredMove {
         Move move;
-        int score = 0;
+        int score;
     };
-    std::vector<ScoredMove> scored;
-    scored.reserve(moves.size());
-    for (const Move& move : moves) {
-        scored.push_back(ScoredMove{move, moveOrderScore(board, move, rootSide)});
+    const int n = moves.size();
+    ScoredMove scored[MoveList::Capacity];
+    for (int i = 0; i < n; ++i) {
+        scored[i] = {moves[i], moveOrderScore(board, moves[i], rootSide)};
     }
-    std::stable_sort(scored.begin(), scored.end(), [](const ScoredMove& left, const ScoredMove& right) {
+    std::stable_sort(scored, scored + n, [](const ScoredMove& left, const ScoredMove& right) {
         return left.score > right.score;
     });
-    std::vector<Move> ordered;
-    ordered.reserve(scored.size());
-    for (const ScoredMove& item : scored) {
-        ordered.push_back(item.move);
+    for (int i = 0; i < n; ++i) {
+        moves[i] = scored[i].move;
     }
-    return ordered;
 }
 
-// 各手の並べ替え優先度を計算
-// MVV-LVA: 高い駒を安い駒で取るほど高スコア
 int LearningEngine::moveOrderScore(const Board& board, const Move& move, Color rootSide) const {
     (void)rootSide;
     int score = 0;
-    // 駒取り: 取る駒の価値が高く、取る側の駒が安いほど良い (MVV-LVA)
     if (!move.isDrop() && board.squares[move.to] != 0) {
         const PieceType captured = typeOf(board.squares[move.to]);
         const PieceType moving = typeOf(board.squares[move.from]);
@@ -868,16 +820,12 @@ int LearningEngine::moveOrderScore(const Board& board, const Move& move, Color r
     if (move.isDrop()) {
         score += pieceValue(move.drop) / 3;
     }
-    // 王手になる手は優先度を上げる
-    Board next = board;
-    applyMove(next, move);
-    if (isKingAttacked(next, next.side)) {
+    if (givesCheck(board, move)) {
         score += 8000;
     }
     return score;
 }
 
-// 制限時間を超えたら探索を打ち切る
 bool LearningEngine::shouldStop() const {
     if (stopped_.load()) {
         return true;
@@ -889,8 +837,6 @@ bool LearningEngine::shouldStop() const {
     return false;
 }
 
-// Zobristハッシュによる差分更新済みの値を返す
-// rootSideも混ぜて同じ局面でも探索視点が異なれば別エントリにする
 std::uint64_t LearningEngine::boardHash(const Board& board, Color rootSide) const {
     return board.hash ^ (rootSide == Black ? 0x9E3779B97F4A7C15ULL : 0x6C62272E07BB0142ULL);
 }

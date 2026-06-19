@@ -41,7 +41,7 @@ void MCTSEngine::expand(MCTSNode* node, const Board& board) {
 
     double priorSum = 0.0;
     std::vector<double> priors(legal.size());
-    for (std::size_t i = 0; i < legal.size(); ++i) {
+    for (int i = 0; i < legal.size(); ++i) {
         int idx = nn_.moveToIndex(legal[i], board.side);
         if (idx >= 0 && idx < static_cast<int>(out.policy.size())) {
             priors[i] = out.policy[idx];
@@ -58,7 +58,7 @@ void MCTSEngine::expand(MCTSNode* node, const Board& board) {
     }
 
     node->children.reserve(legal.size());
-    for (std::size_t i = 0; i < legal.size(); ++i) {
+    for (int i = 0; i < legal.size(); ++i) {
         auto child = std::make_unique<MCTSNode>();
         child->move = legal[i];
         child->parent = node;

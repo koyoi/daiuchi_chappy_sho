@@ -47,21 +47,21 @@ public:
     SearchInfo lastSearchInfo() const;
 
 private:
-    int search(Board board, int depth, int alpha, int beta, Color rootSide) const;
+    int search(Board& board, int depth, int alpha, int beta, Color rootSide) const;
     std::vector<Move> extractPV(Board board, Color rootSide, int maxDepth) const;
-    int quiescence(Board board, int depth, int alpha, int beta, Color rootSide) const;
-    bool canForceMate(Board board, int depth, Color attacker) const;
+    int quiescence(Board& board, int depth, int alpha, int beta, Color rootSide) const;
+    bool canForceMate(Board& board, int depth, Color attacker) const;
     bool isTacticalMove(const Board& board, const Move& move) const;
-    bool chooseMoveByGpu(const Board& board, const std::vector<Move>& legal, Move& selected);
+    bool chooseMoveByGpu(const Board& board, const MoveList& legal, Move& selected);
     std::vector<int> scoreRootMovesParallel(
         const Board& board,
-        const std::vector<Move>& orderedMoves,
+        const MoveList& orderedMoves,
         const std::vector<int>& openingPenalties,
         Color rootSide,
         int depth,
         const std::chrono::steady_clock::time_point& searchStart,
         const InfoCallback& infoCallback) const;
-    std::vector<Move> orderMoves(const Board& board, const std::vector<Move>& moves, Color rootSide) const;
+    void orderMoves(const Board& board, MoveList& moves, Color rootSide) const;
     int moveOrderScore(const Board& board, const Move& move, Color rootSide) const;
     bool shouldStop() const;
     std::uint64_t boardHash(const Board& board, Color rootSide) const;

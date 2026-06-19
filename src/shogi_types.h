@@ -86,7 +86,7 @@ enum Color {
     White = -1,
 };
 
-enum PieceType {
+enum PieceType : std::uint8_t {
     Empty = 0,
     Pawn = 1,
     Lance = 2,
@@ -105,13 +105,43 @@ enum PieceType {
 };
 
 struct Move {
-    int from = -1;
-    int to = -1;
+    std::int8_t from = -1;
+    std::int8_t to = -1;
     PieceType piece = Empty;
     PieceType drop = Empty;
     bool promote = false;
 
+    Move() = default;
+    Move(int f, int t, PieceType p, PieceType d, bool pr)
+        : from(static_cast<std::int8_t>(f)), to(static_cast<std::int8_t>(t)),
+          piece(p), drop(d), promote(pr) {}
+
     bool isDrop() const { return drop != Empty; }
+};
+
+struct MoveList {
+    static constexpr int Capacity = 600;
+    Move data[Capacity];
+    int size_ = 0;
+
+    void push_back(const Move& m) { data[size_++] = m; }
+    bool empty() const { return size_ == 0; }
+    int size() const { return size_; }
+    void clear() { size_ = 0; }
+    Move& operator[](int i) { return data[i]; }
+    const Move& operator[](int i) const { return data[i]; }
+    Move& front() { return data[0]; }
+    const Move& front() const { return data[0]; }
+    Move* begin() { return data; }
+    Move* end() { return data + size_; }
+    const Move* begin() const { return data; }
+    const Move* end() const { return data + size_; }
+};
+
+struct UndoInfo {
+    int captured = 0;
+    std::uint64_t hash = 0;
+    int materialScore = 0;
 };
 
 struct Board {

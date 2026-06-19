@@ -194,6 +194,54 @@ void applyMove(Board& board, const Move& move) {
     ++board.moveNumber;
 }
 
+void applyMove(Board& board, const Move& move, UndoInfo& undo) {
+    undo.captured = move.isDrop() ? 0 : board.squares[move.to];
+    undo.hash = board.hash;
+    undo.materialScore = board.materialScore;
+    applyMove(board, move);
+}
+
+void undoMove(Board& board, const Move& move, const UndoInfo& undo) {
+    board.side = opposite(board.side);
+    --board.moveNumber;
+    board.hash = undo.hash;
+    board.materialScore = undo.materialScore;
+
+    const Color color = board.side;
+    const int colorIdx = color == Black ? 0 : 1;
+    const int enemyIdx = 1 - colorIdx;
+
+    if (move.isDrop()) {
+        board.squares[move.to] = 0;
+        board.occupied[colorIdx].clear(move.to);
+        board.pieceBB[move.drop].clear(move.to);
+        ++hand(board, color)[move.drop];
+    } else {
+        PieceType movedType = move.promote ? promote(move.piece) : move.piece;
+
+        board.occupied[colorIdx].clear(move.to);
+        board.pieceBB[movedType].clear(move.to);
+
+        board.squares[move.from] = makePiece(color, move.piece);
+        board.occupied[colorIdx].set(move.from);
+        board.pieceBB[move.piece].set(move.from);
+
+        board.squares[move.to] = undo.captured;
+        if (undo.captured != 0) {
+            PieceType capType = typeOf(undo.captured);
+            board.occupied[enemyIdx].set(move.to);
+            board.pieceBB[capType].set(move.to);
+            PieceType capBase = unpromote(capType);
+            --hand(board, color)[capBase];
+        }
+
+        if (move.piece == King) {
+            if (color == Black) board.blackKingSquare = move.from;
+            else board.whiteKingSquare = move.from;
+        }
+    }
+}
+
 bool sameMove(const Move& left, const Move& right) {
     return left.from == right.from && left.to == right.to && left.drop == right.drop && left.promote == right.promote;
 }

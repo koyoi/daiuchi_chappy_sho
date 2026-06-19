@@ -213,9 +213,7 @@ TacticalSummary summarizeLegalMoves(Board board, Color color) {
         if (move.promote) {
             ++summary.promotionMoves;
         }
-        Board next = board;
-        applyMove(next, move);
-        if (isKingAttacked(next, next.side)) {
+        if (givesCheck(board, move)) {
             ++summary.checkMoves;
         }
     }

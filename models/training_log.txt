@@ -1,0 +1,4 @@
+
+--- Session 2026-06-19 10:39 (limit 3h00m) ---
+v001: 500 games, 5 epochs, 0m50s
+v002: 1000 games, 5 epochs, 1m43s

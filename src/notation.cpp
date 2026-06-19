@@ -95,7 +95,7 @@ Move parseUsiMove(const Board& board, const std::string& text) {
         const int toFile = text[2] - '0';
         const int toRank = parseUsiRank(text[3]);
         if (inside(toFile, toRank)) {
-            move.to = idx(toFile, toRank);
+            move.to = static_cast<std::int8_t>(idx(toFile, toRank));
         }
         return move;
     }
@@ -104,8 +104,8 @@ Move parseUsiMove(const Board& board, const std::string& text) {
     const int toFile = text[2] - '0';
     const int toRank = parseUsiRank(text[3]);
     if (inside(fromFile, fromRank) && inside(toFile, toRank)) {
-        move.from = idx(fromFile, fromRank);
-        move.to = idx(toFile, toRank);
+        move.from = static_cast<std::int8_t>(idx(fromFile, fromRank));
+        move.to = static_cast<std::int8_t>(idx(toFile, toRank));
         move.piece = typeOf(board.squares[move.from]);
         move.promote = text.size() >= 5 && text[4] == '+';
     }
@@ -200,7 +200,7 @@ Move parseCsaMove(const Board& board, const std::string& text) {
     if (!inside(toFile, toRank) || csaType == Empty) {
         return move;
     }
-    move.to = idx(toFile, toRank);
+    move.to = static_cast<std::int8_t>(idx(toFile, toRank));
     if (fromFile == 0 && fromRank == 0) {
         move.drop = csaType;
         return move;
@@ -208,7 +208,7 @@ Move parseCsaMove(const Board& board, const std::string& text) {
     if (!inside(fromFile, fromRank)) {
         return Move{};
     }
-    move.from = idx(fromFile, fromRank);
+    move.from = static_cast<std::int8_t>(idx(fromFile, fromRank));
     const PieceType current = typeOf(board.squares[move.from]);
     move.piece = current;
     move.promote = csaType != current;
