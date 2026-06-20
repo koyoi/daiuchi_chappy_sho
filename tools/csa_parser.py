@@ -169,6 +169,73 @@ class Board:
         self.white_hand = [0] * 7
         self.side = 1  # 1=Black, -1=White
 
+    # SFEN piece chars: uppercase=Black, lowercase=White
+    _SFEN_PIECE = {
+        1: 'P', 2: 'L', 3: 'N', 4: 'S', 5: 'G', 6: 'B', 7: 'R', 8: 'K',
+        9: '+P', 10: '+L', 11: '+N', 12: '+S', 13: '+B', 14: '+R',
+    }
+    _SFEN_HAND_ORDER = [7, 6, 5, 4, 3, 2, 1]  # R,B,G,S,N,L,P
+    _SFEN_HAND_CHAR = {1: 'P', 2: 'L', 3: 'N', 4: 'S', 5: 'G', 6: 'B', 7: 'R'}
+
+    def to_sfen(self, move_number: int = 1) -> str:
+        """Convert board to SFEN string."""
+        ranks = []
+        for r in range(1, 10):
+            rank_str = ""
+            empty = 0
+            for f in range(9, 0, -1):
+                sq = idx(f, r)
+                piece = self.squares[sq]
+                if piece == 0:
+                    empty += 1
+                else:
+                    if empty > 0:
+                        rank_str += str(empty)
+                        empty = 0
+                    pt = abs(piece)
+                    ch = self._SFEN_PIECE.get(pt, '?')
+                    if piece < 0:
+                        ch = ch[0] + ch[1:].lower() if len(ch) > 1 else ch.lower()
+                    rank_str += ch
+            if empty > 0:
+                rank_str += str(empty)
+            ranks.append(rank_str)
+        board_str = "/".join(ranks)
+        side_str = "b" if self.side == 1 else "w"
+        hand_str = ""
+        for pt in self._SFEN_HAND_ORDER:
+            hi = HAND_INDEX[pt]
+            ch = self._SFEN_HAND_CHAR[pt]
+            if self.black_hand[hi] > 0:
+                if self.black_hand[hi] > 1:
+                    hand_str += str(self.black_hand[hi])
+                hand_str += ch
+            if self.white_hand[hi] > 0:
+                if self.white_hand[hi] > 1:
+                    hand_str += str(self.white_hand[hi])
+                hand_str += ch.lower()
+        if not hand_str:
+            hand_str = "-"
+        return f"{board_str} {side_str} {hand_str} {move_number}"
+
+    @staticmethod
+    def move_to_usi(from_sq: int, to_sq: int, is_drop: bool, drop_piece: int,
+                    promote: bool) -> str:
+        """Convert a move to USI string like '7g7f' or 'P*5e'."""
+        if is_drop:
+            ch = {1: 'P', 2: 'L', 3: 'N', 4: 'S', 5: 'G', 6: 'B', 7: 'R'}.get(drop_piece, '?')
+            to_f = file_of(to_sq)
+            to_r = chr(ord('a') + rank_of(to_sq) - 1)
+            return f"{ch}*{to_f}{to_r}"
+        from_f = file_of(from_sq)
+        from_r = chr(ord('a') + rank_of(from_sq) - 1)
+        to_f = file_of(to_sq)
+        to_r = chr(ord('a') + rank_of(to_sq) - 1)
+        s = f"{from_f}{from_r}{to_f}{to_r}"
+        if promote:
+            s += "+"
+        return s
+
     def encode(self) -> List[int]:
         """Encode board state as 258 integers for NN input.
 

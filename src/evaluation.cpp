@@ -430,6 +430,49 @@ bool Evaluator::save(const std::string& path) const {
     return true;
 }
 
+bool Evaluator::learnFromMove(const Board& board, const Move& correctMove, double lr) {
+    auto legal = generateLegalMoves(board, true);
+    if (legal.size() <= 1) return false;
+
+    int correctIdx = -1;
+    for (std::size_t i = 0; i < legal.size(); ++i) {
+        if (sameMove(legal[i], correctMove)) {
+            correctIdx = static_cast<int>(i);
+            break;
+        }
+    }
+    if (correctIdx < 0) return false;
+
+    std::vector<FeatureVector> features(legal.size());
+    std::vector<double> scores(legal.size());
+    for (std::size_t i = 0; i < legal.size(); ++i) {
+        Board after = board;
+        applyMove(after, legal[i]);
+        features[i] = extractFeatures(after, board.side);
+        scores[i] = std::inner_product(features[i].begin(), features[i].end(),
+                                        weights_.begin(), 0.0);
+    }
+
+    double maxScore = *std::max_element(scores.begin(), scores.end());
+    double sumExp = 0.0;
+    for (auto& s : scores) {
+        s = std::exp(s - maxScore);
+        sumExp += s;
+    }
+
+    FeatureVector expected{};
+    for (std::size_t i = 0; i < legal.size(); ++i) {
+        double p = scores[i] / sumExp;
+        for (int j = 0; j < FeatureCount; ++j) {
+            expected[j] += p * features[i][j];
+        }
+    }
+
+    FeatureVector delta = features[correctIdx] - expected;
+    applyDelta(delta, lr);
+    return true;
+}
+
 void Evaluator::applyDelta(const FeatureVector& delta, double scale) {
     constexpr double L2Lambda = 0.001;
     for (int i = 0; i < FeatureCount; ++i) {

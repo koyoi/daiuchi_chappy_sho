@@ -21,6 +21,7 @@ public:
     bool load(const std::string& path);
     bool save(const std::string& path) const;
     void applyDelta(const FeatureVector& delta, double scale);
+    bool learnFromMove(const Board& board, const Move& correctMove, double lr);
 
 private:
     std::array<double, FeatureCount> weights_{};

@@ -1,4 +1,5 @@
 #include "csa_protocol.h"
+#include "kifu_learner.h"
 #include "usi_protocol.h"
 
 #include <filesystem>
@@ -14,6 +15,9 @@ int main(int argc, char** argv) {
     }
 
     std::string protocol = "usi";
+    shogi::KifuLearnConfig learnConfig;
+    bool learnMode = false;
+
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if ((arg == "--protocol" || arg == "-p") && i + 1 < argc) {
@@ -22,10 +26,21 @@ int main(int argc, char** argv) {
             protocol = "csa";
         } else if (arg == "--usi") {
             protocol = "usi";
+        } else if (arg == "--learn" && i + 1 < argc) {
+            learnMode = true;
+            learnConfig.trainingFile = argv[++i];
+        } else if (arg == "--weights" && i + 1 < argc) {
+            learnConfig.weightsPath = argv[++i];
+        } else if (arg == "--lr" && i + 1 < argc) {
+            learnConfig.learningRate = std::stod(argv[++i]);
+        } else if (arg == "--epochs" && i + 1 < argc) {
+            learnConfig.epochs = std::stoi(argv[++i]);
         }
     }
 
-    if (protocol == "csa") {
+    if (learnMode) {
+        return shogi::learnFromKifu(learnConfig);
+    } else if (protocol == "csa") {
         shogi::csaLoop();
     } else {
         shogi::usiLoop();
