@@ -10,7 +10,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import math
 import random
 import sys
 import time
@@ -18,6 +17,7 @@ from pathlib import Path
 from typing import List
 
 from csa_parser import parse_game, sample_positions
+from tqdm import tqdm
 
 
 BOARD_SQUARES = 81
@@ -128,11 +128,8 @@ def load_games(kifu_dir: Path, min_rate: int, max_games: int,
     games_ok = 0
     skipped = 0
 
-    for i, filepath in enumerate(csa_files):
-        if (i + 1) % 1000 == 0:
-            print(f"  Parsing {i + 1}/{len(csa_files)}... ({len(all_samples)} samples)",
-                  file=sys.stderr)
-
+    for filepath in tqdm(csa_files, desc="Parsing kifu", unit="file",
+                         file=sys.stderr, miniters=1, dynamic_ncols=True):
         samples = parse_game(filepath, min_rate=min_rate)
         if samples is None:
             skipped += 1
@@ -158,7 +155,9 @@ def samples_to_tensors(samples: List[dict], torch_mod, device):
     value_t = torch_mod.zeros(n, dtype=torch_mod.float32)
     policy_t = torch_mod.zeros(n, dtype=torch_mod.long)
 
-    for i, s in enumerate(samples):
+    for i, s in enumerate(tqdm(samples, desc="Converting to tensors",
+                               unit="pos", file=sys.stderr, miniters=1,
+                               dynamic_ncols=True)):
         enc = s["encoded"]
         for j in range(BOARD_SQUARES):
             board_t[i, j] = max(0, min(enc[j], VOCAB_SIZE - 1))
@@ -179,16 +178,48 @@ def samples_to_tensors(samples: List[dict], torch_mod, device):
 
 
 def train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t,
-                torch_mod, nn, device, epochs: int, batch_size: int, lr: float):
+                torch_mod, nn, device, epochs: int, batch_size: int, lr: float,
+                resumed: bool = False, loser_policy_weight: float = 0.1,
+                round_number: int = 1):
     """Train the model on the given data."""
     model.train()
-    optimizer = torch_mod.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    scheduler = torch_mod.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    value_loss_fn = nn.MSELoss()
-    policy_loss_fn = nn.CrossEntropyLoss()
+    round_decay = 0.95 ** (round_number - 1) if resumed else 1.0
+    max_lr = lr * max(round_decay, 0.1)
+    optimizer = torch_mod.optim.AdamW(model.parameters(), lr=max_lr, weight_decay=1e-4)
 
     n = board_t.shape[0]
-    print(f"Training: {n} samples, {epochs} epochs, batch={batch_size}, lr={lr}",
+    total_batches = (n + batch_size - 1) // batch_size
+    total_steps = total_batches * epochs
+
+    scheduler = torch_mod.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=max_lr,
+        total_steps=total_steps,
+        pct_start=0.3,
+        anneal_strategy='cos',
+        div_factor=10,
+        final_div_factor=100,
+    )
+    value_loss_fn = nn.MSELoss()
+    policy_loss_fn = nn.CrossEntropyLoss(reduction='none')
+    avg_v, avg_p = 1.0, 8.0
+
+    # value_t: +1.0 = moving side won, -1.0 = moving side lost
+    policy_weight_t = torch_mod.where(
+        value_t > 0,
+        torch_mod.ones_like(value_t),
+        torch_mod.full_like(value_t, loser_policy_weight),
+    )
+    n_winner = int((value_t > 0).sum().item())
+    n_loser = n - n_winner
+
+    init_lr = max_lr / 10
+    min_lr = init_lr / 100
+    mode = "fine-tune" if resumed else "fresh"
+    print(f"Training ({mode} R{round_number}): {n} samples ({n_winner} winner, {n_loser} loser), "
+          f"{epochs} epochs, batch={batch_size}, "
+          f"lr={init_lr:.2e}→{max_lr:.2e}→{min_lr:.2e}, "
+          f"loser_pw={loser_policy_weight}",
           file=sys.stderr)
 
     for epoch in range(epochs):
@@ -198,19 +229,20 @@ def train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, p
         total_loss_p = 0.0
         batches = 0
 
-        total_batches = (n + batch_size - 1) // batch_size
         for start in range(0, n, batch_size):
             idx = perm[start:start + batch_size]
             pred_v, pred_p = model(board_t[idx], hand_t[idx], side_t[idx],
                                    own_atk_t[idx], opp_atk_t[idx])
             loss_v = value_loss_fn(pred_v, value_t[idx])
-            loss_p = policy_loss_fn(pred_p, policy_t[idx])
+            per_sample_p = policy_loss_fn(pred_p, policy_t[idx])
+            loss_p = (per_sample_p * policy_weight_t[idx]).mean()
             loss = loss_v + loss_p
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch_mod.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            scheduler.step()
 
             total_loss_v += loss_v.item()
             total_loss_p += loss_p.item()
@@ -225,14 +257,15 @@ def train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, p
                   f"v={avg_v_so_far:.4f} p={avg_p_so_far:.4f}",
                   end="", file=sys.stderr, flush=True)
 
-        scheduler.step()
         elapsed = time.time() - t0
         avg_v = total_loss_v / batches
         avg_p = total_loss_p / batches
-        current_lr = scheduler.get_last_lr()[0]
+        current_lr = optimizer.param_groups[0]['lr']
         print(f"\r  epoch {epoch + 1}/{epochs}: "
               f"value_loss={avg_v:.4f} policy_loss={avg_p:.4f} "
               f"lr={current_lr:.6f} ({elapsed:.1f}s)          ", file=sys.stderr)
+
+    return avg_v, avg_p
 
 
 def main():
@@ -241,20 +274,22 @@ def main():
     parser.add_argument("--model", default="nn_model.pt", help="Model save path")
     parser.add_argument("--device", default="auto", help="auto|cuda|cpu")
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--min-rate", type=int, default=0,
-                        help="Minimum player rating (0=all)")
+    parser.add_argument("--min-rate", type=int, default=2500,
+                        help="Minimum player rating for both players (default: 2500)")
     parser.add_argument("--max-games", type=int, default=0,
                         help="Max games to load (0=all)")
-    parser.add_argument("--sample-rate", type=float, default=0.3,
+    parser.add_argument("--sample-rate", type=float, default=0.5,
                         help="Middle-game position sampling rate")
-    parser.add_argument("--opening-n", type=int, default=20,
+    parser.add_argument("--opening-n", type=int, default=40,
                         help="Always include first N moves per game")
-    parser.add_argument("--endgame-n", type=int, default=20,
+    parser.add_argument("--endgame-n", type=int, default=40,
                         help="Always include last N moves per game")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from existing model weights")
+    parser.add_argument("--round", type=int, default=1,
+                        help="Current training round (for LR decay)")
     args = parser.parse_args()
 
     torch_mod, nn = import_torch()
@@ -274,7 +309,6 @@ def main():
     random.shuffle(samples)
 
     # Convert to tensors
-    print("Converting to tensors...", file=sys.stderr)
     board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t = samples_to_tensors(
         samples, torch_mod, device)
     del samples  # free memory
@@ -282,22 +316,38 @@ def main():
     # Build/load model
     model_path = Path(args.model)
     model = build_model(nn).to(device)
+    resumed = False
     if args.resume and model_path.exists():
         state = torch_mod.load(model_path, map_location=device, weights_only=True)
         model.load_state_dict(state)
+        resumed = True
         print(f"Resumed from {model_path}", file=sys.stderr)
 
-    # Train
-    train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t,
-                torch_mod, nn, device, args.epochs, args.batch_size, args.lr)
+    # Multi-GPU
+    gpu_count = torch_mod.cuda.device_count() if device.type == "cuda" else 0
+    if gpu_count > 1:
+        model = torch_mod.nn.DataParallel(model)
+        print(f"Using {gpu_count} GPUs via DataParallel", file=sys.stderr)
 
-    # Save
+    effective_lr = args.lr * 0.2 if resumed else args.lr
+
+    # Train
+    final_vloss, final_ploss = train_model(
+        model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t,
+        torch_mod, nn, device, args.epochs, args.batch_size, effective_lr,
+        resumed=resumed, round_number=args.round)
+
+    # Summary to stdout (parsed by train_loop.py)
+    print(f"value_loss={final_vloss:.4f} policy_loss={final_ploss:.4f}")
+
+    # Save (unwrap DataParallel)
+    save_model = model.module if hasattr(model, 'module') else model
     model_path.parent.mkdir(parents=True, exist_ok=True) if model_path.parent != Path("") else None
-    torch_mod.save(model.state_dict(), model_path)
+    torch_mod.save(save_model.state_dict(), model_path)
     print(f"Saved model to {model_path}", file=sys.stderr)
 
     # Print model stats
-    params = sum(p.numel() for p in model.parameters())
+    params = sum(p.numel() for p in save_model.parameters())
     print(f"Model parameters: {params:,}", file=sys.stderr)
     return 0
 

@@ -367,14 +367,14 @@ def parse_game(filepath: Path, min_rate: int = 0) -> Optional[List[dict]]:
         white_rate = 0
         for line in lines:
             if line.startswith("'black_rate:"):
-                m = re.search(r":(\d+)$", line)
+                m = re.search(r":(\d+(?:\.\d+)?)\s*$", line)
                 if m:
-                    black_rate = int(m.group(1))
+                    black_rate = int(float(m.group(1)))
             elif line.startswith("'white_rate:"):
-                m = re.search(r":(\d+)$", line)
+                m = re.search(r":(\d+(?:\.\d+)?)\s*$", line)
                 if m:
-                    white_rate = int(m.group(1))
-        if black_rate < min_rate and white_rate < min_rate:
+                    white_rate = int(float(m.group(1)))
+        if black_rate < min_rate or white_rate < min_rate:
             return None
 
     # Parse initial position
@@ -506,8 +506,8 @@ def main():
     parser = argparse.ArgumentParser(description="Convert Floodgate CSA kifu to training data")
     parser.add_argument("--input", required=True, help="Root directory containing CSA files")
     parser.add_argument("--output", required=True, help="Output TSV file path")
-    parser.add_argument("--min-rate", type=int, default=0,
-                        help="Minimum rating to include game (0=all)")
+    parser.add_argument("--min-rate", type=int, default=2500,
+                        help="Minimum rating for both players (default: 2500)")
     parser.add_argument("--sample-rate", type=float, default=0.3,
                         help="Sampling rate for middle-game positions (0.0-1.0)")
     parser.add_argument("--opening-n", type=int, default=20,

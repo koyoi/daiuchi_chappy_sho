@@ -74,7 +74,9 @@ def find_existing_versions(models_dir: Path) -> list[int]:
 
 def run_training(python: str, kifu: str, model_path: str, device: str,
                  max_games: int, epochs: int, resume: bool,
-                 min_rate: int, sample_rate: float) -> bool:
+                 min_rate: int, sample_rate: float,
+                 round_number: int = 1) -> dict | None:
+    """Run training. Returns {"ok": bool, "value_loss": float, "policy_loss": float}."""
     cmd = [
         python, str(Path(__file__).parent / "train.py"),
         "--kifu", kifu,
@@ -84,17 +86,32 @@ def run_training(python: str, kifu: str, model_path: str, device: str,
         "--epochs", str(epochs),
         "--min-rate", str(min_rate),
         "--sample-rate", str(sample_rate),
+        "--round", str(round_number),
     ]
     if resume:
         cmd.append("--resume")
 
-    result = subprocess.run(cmd, stderr=sys.stderr)
-    return result.returncode == 0
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=sys.stderr, text=True)
+    if result.returncode != 0:
+        return None
+
+    vloss, ploss = 1.0, 8.0
+    for line in result.stdout.strip().splitlines():
+        if "value_loss=" in line and "policy_loss=" in line:
+            import re
+            mv = re.search(r"value_loss=([\d.]+)", line)
+            mp = re.search(r"policy_loss=([\d.]+)", line)
+            if mv:
+                vloss = float(mv.group(1))
+            if mp:
+                ploss = float(mp.group(1))
+    return {"ok": True, "value_loss": vloss, "policy_loss": ploss}
 
 
 def run_eval(python: str, engine: str, model1: str, model2: str,
              games: int, movetime: int, device: str,
-             nn_python: str | None = None) -> dict | None:
+             nn_python: str | None = None,
+             simulations: int = 100) -> dict | None:
     cmd = [
         python, str(Path(__file__).parent / "self_play.py"),
         "--engine", engine,
@@ -102,14 +119,14 @@ def run_eval(python: str, engine: str, model1: str, model2: str,
         "--model2", model2,
         "--games", str(games),
         "--movetime", str(movetime),
+        "--simulations", str(simulations),
     ]
     if nn_python:
         cmd.extend(["--python", nn_python])
     if device:
         cmd.extend(["--device", device])
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    sys.stderr.write(result.stderr)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=sys.stderr, text=True)
 
     if result.returncode not in (0, 1):
         log(f"Self-play failed with code {result.returncode}")
@@ -139,14 +156,18 @@ def main():
                         help="Max training rounds (default: 100)")
     parser.add_argument("--time-limit", type=int, default=10800,
                         help="Time limit in seconds (default: 10800 = 3 hours)")
-    parser.add_argument("--games-per-round", type=int, default=500,
-                        help="Kifu games per round (cumulative)")
-    parser.add_argument("--epochs", type=int, default=5,
+    parser.add_argument("--games-per-round", type=int, default=0,
+                        help="Kifu games per round (0=all)")
+    parser.add_argument("--epochs", type=int, default=20,
                         help="Epochs per round")
-    parser.add_argument("--eval-games", type=int, default=20,
+    parser.add_argument("--eval-games", type=int, default=6,
                         help="Self-play games per evaluation")
-    parser.add_argument("--movetime", type=int, default=1000,
+    parser.add_argument("--movetime", type=int, default=500,
                         help="Time per move in self-play (ms)")
+    parser.add_argument("--eval-simulations", type=int, default=300,
+                        help="MCTS simulations per move in self-play")
+    parser.add_argument("--eval-loss-threshold", type=float, default=1.0,
+                        help="Skip eval until both value_loss and policy_loss drop below this")
     parser.add_argument("--models-dir", default="models",
                         help="Model output directory")
     parser.add_argument("--device", default="auto", help="auto|cuda|cpu")
@@ -154,8 +175,8 @@ def main():
                         help="Python interpreter (with torch)")
     parser.add_argument("--nn-python", default=None,
                         help="Python path for engine's NNPython option")
-    parser.add_argument("--min-rate", type=int, default=0,
-                        help="Minimum player rating filter")
+    parser.add_argument("--min-rate", type=int, default=2500,
+                        help="Minimum player rating for both players (default: 2500)")
     parser.add_argument("--sample-rate", type=float, default=0.3,
                         help="Middle-game sampling rate")
     args = parser.parse_args()
@@ -183,6 +204,8 @@ def main():
     log(f"  Games/round: {args.games_per_round}")
     log(f"  Epochs:      {args.epochs}")
     log(f"  Eval games:  {args.eval_games}")
+    log(f"  Eval sims:   {args.eval_simulations}/move")
+    log(f"  Eval skip:   loss > {args.eval_loss_threshold}")
     log(f"  Time limit:  {fmt_duration(args.time_limit)}")
     if existing:
         log(f"  Resuming:    from v{start_version:03d} "
@@ -225,10 +248,11 @@ def main():
         t0 = time.time()
         resume = latest_model.exists()
 
-        ok = run_training(
+        train_result = run_training(
             args.python, args.kifu, str(latest_model), args.device,
             total_games, args.epochs, resume,
             args.min_rate, args.sample_rate,
+            round_number=version,
         )
         train_elapsed = time.time() - t0
 
@@ -236,20 +260,32 @@ def main():
             log("Interrupted during training.")
             break
 
-        if not ok:
+        if train_result is None:
             msg = f"v{version:03d}: Training FAILED ({fmt_duration(train_elapsed)})"
             log(msg)
             append_log(log_path, msg)
             continue
 
+        vloss = train_result["value_loss"]
+        ploss = train_result["policy_loss"]
+
         shutil.copy2(str(latest_model), str(version_path))
-        log(f"Saved {version_path.name} ({fmt_duration(train_elapsed)})")
+        log(f"Saved {version_path.name} ({fmt_duration(train_elapsed)}) "
+            f"v={vloss:.4f} p={ploss:.4f}")
         append_log(log_path,
                    f"v{version:03d}: {total_games} games, {args.epochs} epochs, "
-                   f"{fmt_duration(train_elapsed)}")
+                   f"{fmt_duration(train_elapsed)}, v={vloss:.4f} p={ploss:.4f}")
 
-        # --- Self-play vs N-1 ---
-        if version >= 2 and not _interrupted:
+        # --- Self-play (skip if loss still high) ---
+        threshold = args.eval_loss_threshold
+        eval_ready = vloss <= threshold and ploss <= threshold
+        if not eval_ready:
+            log(f"  Eval skipped: v={vloss:.4f} p={ploss:.4f} "
+                f"(need both < {threshold})")
+            append_log(log_path,
+                       f"  eval skipped (v={vloss:.4f} p={ploss:.4f})")
+
+        if eval_ready and version >= 2 and not _interrupted:
             prev_path = models_dir / f"nn_model_v{version - 1:03d}.pt"
             if prev_path.exists():
                 log(f"Self-play: v{version:03d} vs v{version - 1:03d} "
@@ -258,7 +294,7 @@ def main():
                     args.python, args.engine,
                     str(version_path), str(prev_path),
                     args.eval_games, args.movetime, args.device,
-                    args.nn_python,
+                    args.nn_python, args.eval_simulations,
                 )
                 if result:
                     mark = "+" if result["win_rate"] >= 50.0 else "-"
@@ -266,8 +302,7 @@ def main():
                     append_log(log_path,
                                f"  vs v{version - 1:03d}: {result['summary']}")
 
-        # --- Self-play vs N-2 ---
-        if version >= 3 and not _interrupted:
+        if eval_ready and version >= 3 and not _interrupted:
             prev2_path = models_dir / f"nn_model_v{version - 2:03d}.pt"
             if prev2_path.exists():
                 log(f"Self-play: v{version:03d} vs v{version - 2:03d} "
@@ -276,7 +311,7 @@ def main():
                     args.python, args.engine,
                     str(version_path), str(prev2_path),
                     args.eval_games, args.movetime, args.device,
-                    args.nn_python,
+                    args.nn_python, args.eval_simulations,
                 )
                 if result:
                     mark = "+" if result["win_rate"] >= 50.0 else "-"

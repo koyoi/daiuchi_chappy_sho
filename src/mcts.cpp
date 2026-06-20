@@ -201,11 +201,26 @@ MCTSResult MCTSEngine::search(const Board& board, const MCTSConfig& config,
         }
     }
 
+    // Select best move: proportional to visit count with temperature
+    // to ensure variety, especially with low sim counts
     MCTSNode* bestChild = nullptr;
-    int bestVisits = -1;
-    for (auto& c : root->children) {
-        int n = c->visitCount.load(std::memory_order_relaxed);
-        if (n > bestVisits) { bestVisits = n; bestChild = c.get(); }
+    if (simCount < 30) {
+        // Very few sims: pick proportionally to visit counts
+        std::vector<double> weights;
+        weights.reserve(root->children.size());
+        for (auto& c : root->children) {
+            weights.push_back(static_cast<double>(
+                c->visitCount.load(std::memory_order_relaxed)));
+        }
+        std::discrete_distribution<int> dist(weights.begin(), weights.end());
+        int chosen = dist(rng_);
+        bestChild = root->children[chosen].get();
+    } else {
+        int bestVisits = -1;
+        for (auto& c : root->children) {
+            int n = c->visitCount.load(std::memory_order_relaxed);
+            if (n > bestVisits) { bestVisits = n; bestChild = c.get(); }
+        }
     }
 
     auto endTime = std::chrono::steady_clock::now();

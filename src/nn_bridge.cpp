@@ -124,7 +124,12 @@ void NNBridge::setEnabled(bool enabled) { settings_.enabled = enabled; }
 bool NNBridge::enabled() const { return settings_.enabled; }
 void NNBridge::setPython(const std::string& p) { if (!p.empty()) settings_.python = p; }
 void NNBridge::setScript(const std::string& s) { if (!s.empty()) settings_.script = s; }
-void NNBridge::setModel(const std::string& m) { if (!m.empty()) settings_.model = m; }
+void NNBridge::setModel(const std::string& m) {
+    if (!m.empty() && m != settings_.model) {
+        shutdown();
+        settings_.model = m;
+    }
+}
 void NNBridge::setDevice(const std::string& d) { if (!d.empty()) settings_.device = d; }
 
 NNOutput NNBridge::makeFallbackOutput() const {
