@@ -10,9 +10,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
+from itertools import repeat
 from pathlib import Path
 from typing import List
 
@@ -117,7 +120,8 @@ def build_model(nn, d_model=128, nhead=8, num_layers=4, dim_ff=256):
 
 
 def load_games(kifu_dir: Path, min_rate: int, max_games: int,
-               sample_rate: float, opening_n: int, endgame_n: int) -> List[dict]:
+               sample_rate: float, opening_n: int, endgame_n: int,
+               parse_workers: int = 0) -> List[dict]:
     """Load and parse CSA kifu files directly into training samples."""
     csa_files = sorted(kifu_dir.rglob("*.csa"))
     print(f"Found {len(csa_files)} CSA files", file=sys.stderr)
@@ -128,49 +132,86 @@ def load_games(kifu_dir: Path, min_rate: int, max_games: int,
     games_ok = 0
     skipped = 0
 
-    for filepath in tqdm(csa_files, desc="Parsing kifu", unit="file",
-                         file=sys.stderr, miniters=1, dynamic_ncols=True):
-        samples = parse_game(filepath, min_rate=min_rate)
-        if samples is None:
-            skipped += 1
-            continue
+    worker_count = parse_workers if parse_workers > 0 else max(1, os.cpu_count() or 1)
+    if worker_count <= 1:
+        for filepath in tqdm(csa_files, desc="Parsing kifu", unit="file",
+                             file=sys.stderr, miniters=1, dynamic_ncols=True):
+            samples = parse_game(filepath, min_rate=min_rate)
+            if samples is None:
+                skipped += 1
+                continue
 
-        sampled = sample_positions(samples, sample_rate, opening_n, endgame_n)
-        all_samples.extend(sampled)
-        games_ok += 1
+            sampled = sample_positions(samples, sample_rate, opening_n, endgame_n)
+            all_samples.extend(sampled)
+            games_ok += 1
+    else:
+        print(f"Parsing workers: {worker_count}", file=sys.stderr)
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            sampled_iter = executor.map(
+                _parse_and_sample_file,
+                [str(p) for p in csa_files],
+                repeat(min_rate),
+                repeat(sample_rate),
+                repeat(opening_n),
+                repeat(endgame_n),
+                chunksize=8,
+            )
+            for sampled in tqdm(sampled_iter, total=len(csa_files),
+                                desc="Parsing kifu", unit="file",
+                                file=sys.stderr, miniters=1, dynamic_ncols=True):
+                if sampled is None:
+                    skipped += 1
+                    continue
+                all_samples.extend(sampled)
+                games_ok += 1
 
     print(f"Loaded {games_ok} games, {len(all_samples)} samples "
           f"(skipped {skipped})", file=sys.stderr)
     return all_samples
 
 
-def samples_to_tensors(samples: List[dict], torch_mod, device):
-    """Convert parsed samples to training tensors."""
-    n = len(samples)
-    board_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
-    hand_t = torch_mod.zeros(n, 2 * HAND_TYPES, dtype=torch_mod.long)
-    side_t = torch_mod.zeros(n, dtype=torch_mod.long)
-    own_atk_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
-    opp_atk_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
-    value_t = torch_mod.zeros(n, dtype=torch_mod.float32)
-    policy_t = torch_mod.zeros(n, dtype=torch_mod.long)
+def _parse_and_sample_file(filepath: str, min_rate: int,
+                           sample_rate: float, opening_n: int,
+                           endgame_n: int):
+    """Worker entrypoint for process-parallel CSA parsing."""
+    samples = parse_game(Path(filepath), min_rate=min_rate)
+    if samples is None:
+        return None
+    return sample_positions(samples, sample_rate, opening_n, endgame_n)
 
-    for i, s in enumerate(tqdm(samples, desc="Converting to tensors",
-                               unit="pos", file=sys.stderr, miniters=1,
-                               dynamic_ncols=True)):
-        enc = s["encoded"]
-        for j in range(BOARD_SQUARES):
-            board_t[i, j] = max(0, min(enc[j], VOCAB_SIZE - 1))
-        for j in range(2 * HAND_TYPES):
-            hand_t[i, j] = max(0, min(enc[BOARD_SQUARES + j], HAND_MAX))
-        side_t[i] = enc[BOARD_SQUARES + 2 * HAND_TYPES]
-        for j in range(BOARD_SQUARES):
-            if BASE_STATE_SIZE + j < len(enc):
-                own_atk_t[i, j] = min(enc[BASE_STATE_SIZE + j], MAX_ATTACK)
-            if BASE_STATE_SIZE + BOARD_SQUARES + j < len(enc):
-                opp_atk_t[i, j] = min(enc[BASE_STATE_SIZE + BOARD_SQUARES + j], MAX_ATTACK)
-        value_t[i] = s["value"]
-        policy_t[i] = s["move_index"]
+
+def samples_to_tensors(samples: List[dict], torch_mod, device,
+                       tensor_threads: int = 0):
+    """Convert parsed samples to training tensors."""
+    if tensor_threads > 0:
+        torch_mod.set_num_threads(tensor_threads)
+
+    n = len(samples)
+    encoded_rows = [s["encoded"] for s in tqdm(samples, desc="Converting to tensors",
+                                                unit="pos", file=sys.stderr, miniters=1,
+                                                dynamic_ncols=True)]
+    encoded_t = torch_mod.tensor(encoded_rows, dtype=torch_mod.long)
+
+    board_t = encoded_t[:, :BOARD_SQUARES].clamp_(0, VOCAB_SIZE - 1)
+    hand_start = BOARD_SQUARES
+    hand_end = BOARD_SQUARES + 2 * HAND_TYPES
+    hand_t = encoded_t[:, hand_start:hand_end].clamp_(0, HAND_MAX)
+    side_t = encoded_t[:, hand_end]
+
+    own_start = BASE_STATE_SIZE
+    own_end = BASE_STATE_SIZE + BOARD_SQUARES
+    opp_start = own_end
+    opp_end = own_end + BOARD_SQUARES
+
+    if encoded_t.size(1) >= opp_end:
+        own_atk_t = encoded_t[:, own_start:own_end].clamp_(0, MAX_ATTACK)
+        opp_atk_t = encoded_t[:, opp_start:opp_end].clamp_(0, MAX_ATTACK)
+    else:
+        own_atk_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
+        opp_atk_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
+
+    value_t = torch_mod.tensor([s["value"] for s in samples], dtype=torch_mod.float32)
+    policy_t = torch_mod.tensor([s["move_index"] for s in samples], dtype=torch_mod.long)
 
     return (board_t.to(device), hand_t.to(device), side_t.to(device),
             own_atk_t.to(device), opp_atk_t.to(device),
@@ -290,6 +331,10 @@ def main():
                         help="Resume from existing model weights")
     parser.add_argument("--round", type=int, default=1,
                         help="Current training round (for LR decay)")
+    parser.add_argument("--parse-workers", type=int, default=0,
+                        help="Parallel workers for kifu parsing (0=auto)")
+    parser.add_argument("--tensor-threads", type=int, default=0,
+                        help="CPU threads used during tensor conversion (0=default)")
     args = parser.parse_args()
 
     torch_mod, nn = import_torch()
@@ -300,6 +345,7 @@ def main():
     samples = load_games(
         Path(args.kifu), args.min_rate, args.max_games,
         args.sample_rate, args.opening_n, args.endgame_n,
+        args.parse_workers,
     )
     if not samples:
         print("No samples loaded. Check kifu path and filters.", file=sys.stderr)
@@ -310,7 +356,7 @@ def main():
 
     # Convert to tensors
     board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t = samples_to_tensors(
-        samples, torch_mod, device)
+        samples, torch_mod, device, args.tensor_threads)
     del samples  # free memory
 
     # Build/load model
