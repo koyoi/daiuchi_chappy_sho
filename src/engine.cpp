@@ -276,7 +276,6 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
     const int maxDepth = depthLimit();
     const int pruneWidth = rootPruneWidth_;
     for (int depth = 1; depth <= maxDepth && !shouldStop(); ++depth) {
-        const std::uint64_t nodesBeforeDepth = nodes_.load();
         const std::vector<int> scores = scoreRootMovesParallel(board, legal, openingPenalties, rootSide, depth, pruneWidth, searchStart, infoCallback);
 
         if (shouldStop()) {
@@ -417,15 +416,18 @@ int LearningEngine::threadCount() const {
 
 void LearningEngine::setWeightsPath(const std::string& path) {
     learner_.setWeightsPath(path);
-    learner_.loadWeights();
 }
 
 void LearningEngine::setTrainingDataPath(const std::string& path) {
     learner_.setTrainingDataPath(path);
 }
 
-void LearningEngine::loadWeights() {
-    learner_.loadWeights();
+bool LearningEngine::loadWeights() {
+    return learner_.loadWeights();
+}
+
+const std::string& LearningEngine::weightsPath() const {
+    return learner_.weightsPath();
 }
 
 bool LearningEngine::loadMlpWeights(const std::string& path) {

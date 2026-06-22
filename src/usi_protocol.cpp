@@ -133,7 +133,11 @@ void handleSetOption(LearningEngine& engine, const std::vector<std::string>& wor
         engine.setTrainingDataPath(value);
     } else if (name == "MlpWeightsFile") {
         if (!value.empty()) {
-            engine.loadMlpWeights(value);
+            if (!engine.loadMlpWeights(value)) {
+                std::cout << "info string ERROR: failed to load MLP weights: " << value << std::endl;
+            } else {
+                std::cout << "info string MLP weights loaded: " << value << std::endl;
+            }
         }
     } else if (name == "RootPruneWidth") {
         try {
@@ -247,6 +251,9 @@ void usiLoop() {
             std::cout << "option name RootPruneWidth type spin default 15 min 0 max 256" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
+            if (!engine.loadWeights()) {
+                std::cout << "info string WARNING: linear weights not found: " << engine.weightsPath() << " (using defaults)" << std::endl;
+            }
             std::cout << "readyok" << std::endl;
         } else if (command == "setoption") {
             handleSetOption(engine, words);

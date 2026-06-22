@@ -30,11 +30,11 @@ def pick_device(torch, requested: str):
 
 def make_model(nn):
     return nn.Sequential(
-        nn.Linear(FEATURE_COUNT, 64),
+        nn.Linear(FEATURE_COUNT, 128),
         nn.ReLU(),
-        nn.Linear(64, 32),
+        nn.Linear(128, 64),
         nn.ReLU(),
-        nn.Linear(32, 1),
+        nn.Linear(64, 1),
     )
 
 
