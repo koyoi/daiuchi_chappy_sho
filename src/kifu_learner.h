@@ -15,4 +15,12 @@ struct KifuLearnConfig {
 
 int learnFromKifu(const KifuLearnConfig& config);
 
+struct ExtractFeaturesConfig {
+    std::string trainingFile;
+    std::string outputFile = "gpu_training.tsv";
+    int negatives = 1;
+};
+
+int extractFeatures(const ExtractFeaturesConfig& config);
+
 } // namespace shogi

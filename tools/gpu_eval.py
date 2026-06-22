@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Tuple
 
 
-FEATURE_COUNT = 44
+FEATURE_COUNT = 74
 
 
 def import_torch():
