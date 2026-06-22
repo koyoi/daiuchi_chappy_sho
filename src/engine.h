@@ -1,7 +1,6 @@
 #pragma once
 
 #include "evaluation.h"
-#include "gpu_bridge.h"
 #include "learning.h"
 #include "search_types.h"
 #include "shogi_types.h"
@@ -37,13 +36,9 @@ public:
     int threadCount() const;
     void setWeightsPath(const std::string& path);
     void setTrainingDataPath(const std::string& path);
-    void setGpuEnabled(bool enabled);
-    void setGpuTrainOnGameEnd(bool enabled);
-    void setGpuPython(const std::string& python);
-    void setGpuScript(const std::string& script);
-    void setGpuModel(const std::string& model);
-    void setGpuDevice(const std::string& device);
     void loadWeights();
+    bool loadMlpWeights(const std::string& path);
+    void setRootPruneWidth(int width);
     SearchInfo lastSearchInfo() const;
 
 private:
@@ -52,13 +47,13 @@ private:
     int quiescence(Board& board, int depth, int alpha, int beta, Color rootSide) const;
     bool canForceMate(Board& board, int depth, Color attacker) const;
     bool isTacticalMove(const Board& board, const Move& move) const;
-    bool chooseMoveByGpu(const Board& board, const MoveList& legal, Move& selected);
     std::vector<int> scoreRootMovesParallel(
         const Board& board,
         const MoveList& orderedMoves,
         const std::vector<int>& openingPenalties,
         Color rootSide,
         int depth,
+        int pruneWidth,
         const std::chrono::steady_clock::time_point& searchStart,
         const InfoCallback& infoCallback) const;
     void orderMoves(const Board& board, MoveList& moves, Color rootSide) const;
@@ -84,7 +79,6 @@ private:
 
     Evaluator evaluator_;
     OnlineLearner learner_;
-    GpuBridge gpu_;
     mutable std::vector<TranspositionEntry> transposition_;
     mutable std::array<std::mutex, LockCount> transpositionMutex_;
     mutable std::uint8_t ttGeneration_{0};
@@ -98,6 +92,7 @@ private:
     std::mt19937 rng_;
     int searchDepth_ = 0;
     bool openingSafety_ = true;
+    int rootPruneWidth_ = 15;
 };
 
 } // namespace shogi

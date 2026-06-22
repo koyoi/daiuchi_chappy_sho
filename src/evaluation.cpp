@@ -684,8 +684,64 @@ FeatureVector Evaluator::extractFeatures(const Board& board, Color perspective) 
 
 int Evaluator::evaluate(const Board& board, Color perspective) const {
     const FeatureVector features = extractFeatures(board, perspective);
+    if (mlpLoaded_) {
+        return evaluateMlp(features);
+    }
     const double score = std::inner_product(features.begin(), features.end(), weights_.begin(), 0.0);
     return static_cast<int>(std::clamp(score, -30000.0, 30000.0));
+}
+
+int Evaluator::evaluateMlp(const FeatureVector& features) const {
+    double h1[MlpHidden1];
+    for (int j = 0; j < MlpHidden1; ++j) {
+        double sum = b1_[j];
+        for (int i = 0; i < FeatureCount; ++i) {
+            sum += w1_[j][i] * features[i];
+        }
+        h1[j] = sum > 0.0 ? sum : 0.0;
+    }
+    double h2[MlpHidden2];
+    for (int j = 0; j < MlpHidden2; ++j) {
+        double sum = b2_[j];
+        for (int i = 0; i < MlpHidden1; ++i) {
+            sum += w2_[j][i] * h1[i];
+        }
+        h2[j] = sum > 0.0 ? sum : 0.0;
+    }
+    double out = b3_;
+    for (int i = 0; i < MlpHidden2; ++i) {
+        out += w3_[i] * h2[i];
+    }
+    return static_cast<int>(std::clamp(out * 1000.0, -30000.0, 30000.0));
+}
+
+bool Evaluator::loadMlp(const std::string& path) {
+    std::ifstream in(path);
+    if (!in) {
+        return false;
+    }
+    int inputDim = 0, hidden1 = 0, hidden2 = 0;
+    if (!(in >> inputDim >> hidden1 >> hidden2)) {
+        return false;
+    }
+    if (inputDim != FeatureCount || hidden1 != MlpHidden1 || hidden2 != MlpHidden2) {
+        return false;
+    }
+    for (int j = 0; j < MlpHidden1; ++j)
+        for (int i = 0; i < FeatureCount; ++i)
+            if (!(in >> w1_[j][i])) return false;
+    for (int j = 0; j < MlpHidden1; ++j)
+        if (!(in >> b1_[j])) return false;
+    for (int j = 0; j < MlpHidden2; ++j)
+        for (int i = 0; i < MlpHidden1; ++i)
+            if (!(in >> w2_[j][i])) return false;
+    for (int j = 0; j < MlpHidden2; ++j)
+        if (!(in >> b2_[j])) return false;
+    for (int i = 0; i < MlpHidden2; ++i)
+        if (!(in >> w3_[i])) return false;
+    if (!(in >> b3_)) return false;
+    mlpLoaded_ = true;
+    return true;
 }
 
 void Evaluator::setHeavyFeatures(bool enabled) {

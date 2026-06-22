@@ -10,7 +10,8 @@ uv.lock
 *.user
 *.weights
 *.pt
-gpu_training.tsv
+*_training.tsv
+*_positions.tsv
 .vs/
 __pycache__/
 /kifu/

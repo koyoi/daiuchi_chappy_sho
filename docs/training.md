@@ -1,22 +1,27 @@
 # 学習パイプライン
 
-Transformer モデルの学習に関するツール群の説明。
+2 つのエンジンが Floodgate CSA 棋譜から学習できます。
+入力は共通、各エンジン専用のスクリプトがパース→学習→モデル保存を行います。
 
 ---
 
-## 概要
+## 全体像
 
 ```text
-Floodgate CSA 棋譜
-        ↓
-   csa_parser.py (パース)
-        ↓
-   train.py (学習 → nn_model.pt)
-        ↓
-   train_loop.py (バージョン管理 + 自己対戦評価)
-        ↓
-   nn_model.pt → kishi-to.exe で使用
+Floodgate CSA 棋譜 (kifu/floodgate/*.csa)
+        │
+        ├── train_classic.py ──→ random-shogi.weights  (Classic 線形評価)
+        │
+        ├── train_mlp.py    ──→ mlp_model.pt + mlp.weights  (Classic MLP 評価)
+        │
+        └── train.py        ──→ nn_model.pt            (kishi-to MCTS)
 ```
+
+| エンジン | 学習スクリプト | モデルファイル | 評価方式 |
+|---------|-------------|-------------|---------|
+| Classic (αβ探索 線形) | `train_classic.py` | `random-shogi.weights` | 74次元線形 |
+| Classic (αβ探索 MLP) | `train_mlp.py` | `mlp.weights` | MLP (74→64→32→1) |
+| MCTS (Transformer) | `train.py` | `nn_model.pt` | Transformer (方策+価値) |
 
 ---
 
@@ -36,13 +41,124 @@ kifu/
 
 ---
 
-## 単発学習 (`train.py`)
+## 1. Classic エンジン — 線形評価 (`train_classic.py`)
 
-CSA 棋譜から直接 Transformer を学習します。
+74次元の手作り特徴量に対する線形重みを Bonanza 法で学習します。
+
+### クイックスタート
 
 ```sh
-python tools/train.py --kifu kifu/floodgate --model nn_model.pt
+python tools/train_classic.py \
+  --kifu kifu/floodgate \
+  --engine build/kishi-to-classic
 ```
+
+### 内部の流れ
+
+1. CSA 棋譜をパースし、勝者（高レート側）の指し手を SFEN+USI 形式で抽出
+2. `classic_training.tsv` に書き出し
+3. `kishi-to-classic --learn classic_training.tsv` を実行
+4. 各局面で正解手のスコアが高くなるよう重みを勾配降下で更新
+5. `random-shogi.weights` に保存
+
+### オプション
+
+| オプション | デフォルト | 説明 |
+|-----------|----------|------|
+| `--kifu` | (必須) | CSA 棋譜のルートディレクトリ |
+| `--engine` | (必須) | `kishi-to-classic` 実行ファイル |
+| `--weights` | `random-shogi.weights` | 重みファイルパス |
+| `--min-rate` | 1500 | 最低レーティング |
+| `--max-games` | 0 | 最大棋譜数 (0=全部) |
+| `--skip-opening` | 10 | 序盤 N 手をスキップ |
+| `--sample-rate` | 0.5 | 局面のサンプリング率 |
+| `--lr` | 0.01 | 学習率 |
+| `--epochs` | 1 | エポック数 |
+| `--temperature` | 100.0 | softmax 温度 |
+
+### モデルの配備
+
+```sh
+cp random-shogi.weights build/random-shogi.weights
+```
+
+---
+
+## 2. Classic エンジン — MLP 評価 (`train_mlp.py`)
+
+Classic と同じ 74 次元特徴量を入力とする MLP を学習し、テキスト形式の重みファイルにエクスポートします。
+αβ探索のリーフノード評価を MLP に置き換えることで、非線形パターン（駒の連携・囲い強度など）を捉えた評価が可能になります。
+
+### クイックスタート
+
+```sh
+python tools/train_mlp.py \
+  --kifu kifu/floodgate \
+  --engine build/kishi-to-classic
+```
+
+### 内部の流れ
+
+1. CSA 棋譜をパースし、SFEN+USI 形式で抽出（Classic と共通）
+2. `kishi-to-classic --extract-features` で 74 次元特徴量を抽出
+   - 正解手の局面 → ラベル +1.0
+   - ランダムな不正解手の局面 → ラベル -1.0
+3. `mlp_eval.py train` で MLP (74→64→32→1) を BCEWithLogitsLoss で学習
+4. `mlp_model.pt` に保存
+5. `export_mlp.py` で `mlp.weights`（テキスト形式）にエクスポート
+
+### オプション
+
+| オプション | デフォルト | 説明 |
+|-----------|----------|------|
+| `--kifu` | (必須) | CSA 棋譜のルートディレクトリ |
+| `--engine` | (必須) | `kishi-to-classic` 実行ファイル |
+| `--model` | `mlp_model.pt` | モデル保存先 |
+| `--min-rate` | 1500 | 最低レーティング |
+| `--max-games` | 0 | 最大棋譜数 (0=全部) |
+| `--skip-opening` | 10 | 序盤 N 手をスキップ |
+| `--sample-rate` | 0.5 | 局面のサンプリング率 |
+| `--negatives` | 1 | 局面あたりの負例数 |
+| `--epochs` | 5 | 学習エポック数 |
+| `--batch-size` | 512 | バッチサイズ |
+| `--lr` | 1e-3 | 学習率 |
+| `--device` | `auto` | `auto` / `cuda` / `cpu` |
+
+### モデルの配備
+
+```sh
+cp mlp.weights build/mlp.weights
+```
+
+USI で `setoption name MlpWeightsFile value mlp.weights` を設定すると MLP 評価に切り替わります。
+
+### 手動エクスポート
+
+```sh
+python tools/export_mlp.py --model mlp_model.pt --output mlp.weights
+```
+
+---
+
+## 3. MCTS エンジン (`kishi-to`)
+
+Transformer で方策（次の一手の確率分布）と価値（勝率）を同時に学習します。
+
+### クイックスタート
+
+```sh
+python tools/train.py \
+  --kifu kifu/floodgate \
+  --model nn_model.pt
+```
+
+### 内部の流れ
+
+1. CSA 棋譜をパースし、盤面を 258 整数にエンコード
+2. 方策ラベル: 正解手の policy インデックス (0-2186)
+3. 価値ラベル: 指し手側の勝敗 (+1/-1)
+4. Transformer (d=128, 4層, 8ヘッド) を CrossEntropy + MSE で学習
+5. `nn_model.pt` に保存
 
 ### オプション
 
@@ -57,170 +173,58 @@ python tools/train.py --kifu kifu/floodgate --model nn_model.pt
 | `--min-rate` | 0 | 最低レーティング (0=フィルタなし) |
 | `--max-games` | 0 | 最大棋譜数 (0=全部) |
 | `--sample-rate` | 0.3 | 中盤局面のサンプリング率 |
-| `--opening-n` | 20 | 各棋譜の序盤 N 手は必ず使用 |
-| `--endgame-n` | 20 | 各棋譜の終盤 N 手は必ず使用 |
+| `--opening-n` | 20 | 序盤 N 手は必ず使用 |
+| `--endgame-n` | 20 | 終盤 N 手は必ず使用 |
 | `--resume` | - | 既存モデルから再開 |
 
-### サンプリング戦略
+### バージョン管理付き学習ループ (`train_loop.py`)
 
-全局面を均等に使うのではなく、序盤と終盤を重視:
-
-- **序盤 20 手**: 必ず含める (定跡の学習)
-- **終盤 20 手**: 必ず含める (寄せの学習)
-- **中盤**: 30% の確率でサンプリング (局面の偏りを防ぐ)
-
-### 進捗表示
-
-```text
-Device: cuda
-Found 60485 CSA files
-  Parsing 1000/60485... (28341 samples)
-  ...
-Training: 185234 samples, 20 epochs, batch=256, lr=0.0001
-  epoch 1/20: [=====>              ]  25% | v=0.8523 p=5.1234
-  epoch 1/20: value_loss=0.7891 policy_loss=4.8765 lr=0.000100 (42.3s)
-  ...
-Saved model to nn_model.pt
-Model parameters: 6,987,788
-```
-
----
-
-## バージョン管理付き学習ループ (`train_loop.py`)
-
-500 局 × 5 エポックを 1 ラウンドとして、段階的に学習とモデルの性能評価を行います。
+段階的に棋譜数を増やしながら学習と自己対戦評価を繰り返します。
 
 ```sh
 python tools/train_loop.py \
   --kifu kifu/floodgate \
-  --engine build/Release/kishi-to.exe \
+  --engine build/kishi-to \
   --rounds 10
 ```
 
-### オプション
-
-| オプション | デフォルト | 説明 |
-|-----------|----------|------|
-| `--kifu` | (必須) | CSA 棋譜のルートディレクトリ |
-| `--engine` | (必須) | USI エンジン実行ファイル |
-| `--rounds` | 10 | 学習ラウンド数 |
-| `--games-per-round` | 500 | 1 ラウンドあたりの棋譜数 (累積) |
-| `--epochs` | 5 | 1 ラウンドのエポック数 |
-| `--eval-games` | 20 | 自己対戦の局数 |
-| `--movetime` | 1000 | 自己対戦の 1 手あたり時間 (ms) |
-| `--models-dir` | `models` | モデル保存ディレクトリ |
-| `--device` | `auto` | PyTorch デバイス |
-| `--python` | (現在の Python) | Python インタープリタ |
-| `--nn-python` | - | エンジン用の Python パス |
-| `--min-rate` | 0 | 最低レーティング |
-| `--sample-rate` | 0.3 | 中盤サンプリング率 |
-
-### 1 ラウンドの流れ
-
-1. `train.py --resume` で累積学習 (ラウンド N は最初の N×500 局を使用)
+1 ラウンドごとに:
+1. 累積棋譜で `train.py --resume` を実行
 2. `models/nn_model_v{N}.pt` に保存
-3. `models/nn_model.pt` にコピー (最新版)
-4. N≥2: v(N) vs v(N-1) で自己対戦
-5. N≥3: v(N) vs v(N-2) で自己対戦
-6. 結果を `models/training_log.txt` に記録
+3. 前バージョンと自己対戦 (勝率を比較)
+4. `models/training_log.txt` に記録
 
-### 出力ディレクトリ
-
-```text
-models/
-  nn_model_v001.pt
-  nn_model_v002.pt
-  nn_model_v003.pt
-  nn_model.pt          ← 最新版のコピー
-  training_log.txt     ← 学習ログ + 対戦結果
-```
-
-### 出力例
-
-```text
-==================================================
-=== Round 1/10 (v001) ===
-==================================================
-Training with 500 games, 5 epochs...
-  epoch 1/5: value_loss=0.8234 policy_loss=5.1234 lr=0.000100 (38.2s)
-  ...
-Saved models/nn_model_v001.pt (190s)
-(No previous model for comparison)
-
-==================================================
-=== Round 2/10 (v002) ===
-==================================================
-Training with 1000 games, 5 epochs...
-  ...
-Saved models/nn_model_v002.pt (245s)
-Evaluating v002 vs v001 (20 games)...
-  v002 vs v001: 12W-6L-2D (60.0%) -> improved
-```
-
----
-
-## 自己対戦 (`self_play.py`)
-
-2 つのモデルを USI プロトコルで対局させて勝率を比較します。
+### 自己対戦 (`self_play.py`)
 
 ```sh
 python tools/self_play.py \
-  --engine build/Release/kishi-to.exe \
+  --engine build/kishi-to \
   --model1 models/nn_model_v002.pt \
   --model2 models/nn_model_v001.pt \
-  --games 20 \
-  --movetime 1000
+  --games 20
 ```
 
-### オプション
-
-| オプション | デフォルト | 説明 |
-|-----------|----------|------|
-| `--engine` | (必須) | USI エンジン実行ファイル |
-| `--model1` | - | エンジン 1 のモデル |
-| `--model2` | - | エンジン 2 のモデル |
-| `--games` | 20 | 対局数 |
-| `--movetime` | 1000 | 1 手あたり時間 (ms) |
-| `--python` | - | エンジン用 Python パス |
-| `--device` | - | PyTorch デバイス |
-
-### 動作
-
-- 同じエンジン実行ファイルを 2 プロセス起動
-- `setoption name NNModel value <path>` でモデルを切り替え
-- 先後を毎局交替
-- `bestmove resign` で投了、512 手で引き分け
-- model1 の勝率 50% 以上なら終了コード 0、未満なら 1
-
----
-
-## CSA パーサー (`csa_parser.py`)
-
-Floodgate 形式の CSA 棋譜を解析するモジュール。`train.py` から呼ばれます。
-
-### 機能
-
-- 棋譜ファイルから盤面・指し手・結果を抽出
-- `'summary:` 行から勝敗を判定
-- レーティングフィルタ (`min_rate`)
-- 96 整数の盤面エンコーディングと policy インデックスを出力
-
----
-
-## モデルの配備
-
-学習したモデルを MCTS エンジンで使うには、`nn_model.pt` をエンジン実行ファイルと同じディレクトリに配置します。
+### モデルの配備
 
 ```sh
-cp models/nn_model.pt build/Release/nn_model.pt
+cp nn_model.pt build/nn_model.pt
 ```
 
-エンジンは起動時に作業ディレクトリを exe の場所に変更するため、相対パス `nn_model.pt` で自動的にロードされます。ShogiGUI / 将棋所からの起動でも同様です。
+---
+
+## 共通ツール
+
+| ファイル | 役割 |
+|---------|------|
+| `tools/csa_parser.py` | Floodgate CSA 棋譜パーサー (全スクリプト共通) |
+| `tools/export_mlp.py` | PyTorch MLP → テキスト重みファイル変換 |
+| `tools/self_play.py` | USI 自己対戦 (MCTS 用) |
+| `tools/train_loop.py` | バージョン管理付き学習ループ (MCTS 用) |
 
 ---
 
 ## 関連ドキュメント
 
-- [使い方](usage.md) — USI オプションの一覧
-- [MCTS + Transformer](mcts.md) — 探索アルゴリズムの詳細
-- [Classic 評価関数](evaluation.md) — 線形特徴量方式
+- [使い方](usage.md) — GUI 登録・USI オプション
+- [Classic 評価関数](evaluation.md) — 74 次元線形特徴量の詳細
+- [MCTS + Transformer](mcts.md) — ニューラルネット探索のアルゴリズム

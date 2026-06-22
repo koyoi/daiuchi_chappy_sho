@@ -12,6 +12,9 @@ using FeatureVector = std::array<double, FeatureCount>;
 
 class Evaluator {
 public:
+    static constexpr int MlpHidden1 = 64;
+    static constexpr int MlpHidden2 = 32;
+
     Evaluator();
 
     int evaluate(const Board& board, Color perspective) const;
@@ -29,9 +32,22 @@ public:
     };
     bool computeGradient(const Board& board, const Move& correctMove, GradientResult& out, double temperature = 100.0) const;
 
+    bool loadMlp(const std::string& path);
+    bool mlpLoaded() const { return mlpLoaded_; }
+
 private:
+    int evaluateMlp(const FeatureVector& features) const;
+
     std::array<double, FeatureCount> weights_{};
     bool heavyFeatures_ = false;
+
+    double w1_[MlpHidden1][FeatureCount]{};
+    double b1_[MlpHidden1]{};
+    double w2_[MlpHidden2][MlpHidden1]{};
+    double b2_[MlpHidden2]{};
+    double w3_[MlpHidden2]{};
+    double b3_ = 0.0;
+    bool mlpLoaded_ = false;
 };
 
 FeatureVector operator-(const FeatureVector& left, const FeatureVector& right);

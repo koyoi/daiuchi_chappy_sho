@@ -1,6 +1,7 @@
 #include "kifu_learner.h"
 
 #include "evaluation.h"
+#include "movegen.h"
 #include "notation.h"
 #include "position.h"
 
@@ -182,6 +183,83 @@ int learnFromKifu(const KifuLearnConfig& config) {
     std::cerr << "Training complete: " << totalUpdates << " updates, "
               << totalSkipped << " skipped over " << config.epochs << " epochs"
               << std::endl;
+    return 0;
+}
+
+int extractFeatures(const ExtractFeaturesConfig& config) {
+    Evaluator evaluator;
+    evaluator.setHeavyFeatures(false);
+
+    auto samples = loadTrainingFile(config.trainingFile);
+    if (samples.empty()) return 1;
+
+    std::ofstream out(config.outputFile);
+    if (!out) {
+        std::cerr << "Cannot open output file: " << config.outputFile << std::endl;
+        return 1;
+    }
+
+    std::mt19937 rng{std::random_device{}()};
+    int written = 0;
+    int skipped = 0;
+
+    for (const auto& sample : samples) {
+        Board board;
+        std::istringstream iss(sample.sfen);
+        std::string boardPart, sidePart, handPart, movePart;
+        iss >> boardPart >> sidePart >> handPart >> movePart;
+        if (!setFromSfen(board, boardPart, sidePart, handPart, movePart)) {
+            ++skipped;
+            continue;
+        }
+
+        Move move = parseUsiMove(board, sample.usiMove);
+        if (move.to < 0) {
+            ++skipped;
+            continue;
+        }
+
+        Color perspective = board.side;
+
+        // positive: features after applying the correct move
+        Board after = board;
+        applyMove(after, move);
+        FeatureVector posFeatures = evaluator.extractFeatures(after, perspective);
+        out << "1.0";
+        for (int i = 0; i < FeatureCount; ++i) {
+            out << '\t' << posFeatures[i];
+        }
+        out << '\n';
+        ++written;
+
+        // negatives: features after applying random other legal moves
+        auto legal = generateLegalMoves(board, true);
+        std::vector<Move> others;
+        for (const Move& m : legal) {
+            if (!sameMove(m, move)) others.push_back(m);
+        }
+        if (!others.empty()) {
+            std::shuffle(others.begin(), others.end(), rng);
+            int negCount = std::min(config.negatives, static_cast<int>(others.size()));
+            for (int n = 0; n < negCount; ++n) {
+                Board neg = board;
+                applyMove(neg, others[n]);
+                FeatureVector negFeatures = evaluator.extractFeatures(neg, perspective);
+                out << "-1.0";
+                for (int i = 0; i < FeatureCount; ++i) {
+                    out << '\t' << negFeatures[i];
+                }
+                out << '\n';
+                ++written;
+            }
+        }
+
+        if (written % 100000 < 3) {
+            std::cerr << "\r  extracted " << written << " samples..." << std::flush;
+        }
+    }
+
+    std::cerr << "\r  extracted " << written << " samples (skipped " << skipped << ")" << std::endl;
     return 0;
 }
 

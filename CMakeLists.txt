@@ -37,26 +37,19 @@ add_executable(kishi-to-classic
     src/engine.cpp
     src/evaluation.cpp
     src/learning.cpp
-    src/gpu_bridge.cpp
     src/kifu_learner.cpp
     src/usi_protocol.cpp
     src/csa_protocol.cpp
     src/main.cpp
 )
-target_link_libraries(kishi-to-classic PRIVATE shogi_core)
+find_package(Threads REQUIRED)
+target_link_libraries(kishi-to-classic PRIVATE shogi_core Threads::Threads)
 target_compile_features(kishi-to-classic PRIVATE cxx_std_17)
 if(MSVC)
     target_compile_options(kishi-to-classic PRIVATE /W4 /permissive- /utf-8)
 else()
     target_compile_options(kishi-to-classic PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-
-add_custom_command(TARGET kishi-to-classic POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:kishi-to-classic>/tools"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/tools/gpu_eval.py"
-        "$<TARGET_FILE_DIR:kishi-to-classic>/tools/gpu_eval.py"
-)
 
 # --- MCTSエンジン (Transformer + MCTS) ---
 add_executable(kishi-to

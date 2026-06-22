@@ -16,7 +16,9 @@ int main(int argc, char** argv) {
 
     std::string protocol = "usi";
     shogi::KifuLearnConfig learnConfig;
+    shogi::ExtractFeaturesConfig extractConfig;
     bool learnMode = false;
+    bool extractMode = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -29,6 +31,13 @@ int main(int argc, char** argv) {
         } else if (arg == "--learn" && i + 1 < argc) {
             learnMode = true;
             learnConfig.trainingFile = argv[++i];
+        } else if (arg == "--extract-features" && i + 1 < argc) {
+            extractMode = true;
+            extractConfig.trainingFile = argv[++i];
+        } else if (arg == "--output" && i + 1 < argc) {
+            extractConfig.outputFile = argv[++i];
+        } else if (arg == "--negatives" && i + 1 < argc) {
+            extractConfig.negatives = std::stoi(argv[++i]);
         } else if (arg == "--weights" && i + 1 < argc) {
             learnConfig.weightsPath = argv[++i];
         } else if (arg == "--lr" && i + 1 < argc) {
@@ -42,7 +51,9 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (learnMode) {
+    if (extractMode) {
+        return shogi::extractFeatures(extractConfig);
+    } else if (learnMode) {
         return shogi::learnFromKifu(learnConfig);
     } else if (protocol == "csa") {
         shogi::csaLoop();
