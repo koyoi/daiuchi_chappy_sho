@@ -262,14 +262,34 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
 
     Move gpuMove;
     if (chooseMoveByGpu(board, legal, gpuMove)) {
+        // Validate GPU-picked move: ensure it's among legal moves and doesn't leave king in check.
+        Move candidate = gpuMove;
+        bool legalFound = false;
+        for (const Move& m : legal) {
+            if (sameMove(m, candidate)) {
+                legalFound = true;
+                break;
+            }
+        }
+        if (legalFound) {
+            Board tmp = board;
+            applyMove(tmp, candidate);
+            if (isKingAttacked(tmp, tmp.side)) {
+                legalFound = false;
+            }
+        }
+        if (!legalFound) {
+            if (!legal.empty()) candidate = legal.front();
+            else candidate = Move{};
+        }
         SearchInfo info;
         info.depth = 1;
         info.nodes = static_cast<std::uint64_t>(legal.size());
         info.timeMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - searchStart).count());
-        info.bestMove = gpuMove;
-        info.hasBestMove = true;
+        info.bestMove = candidate;
+        info.hasBestMove = candidate.to >= 0;
         setLastSearchInfo(info);
-        return gpuMove;
+        return candidate;
     }
 
     const Color rootSide = board.side;
@@ -336,7 +356,25 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
         bestMoves.push_back(legal.front());
     }
     std::uniform_int_distribution<std::size_t> dist(0, bestMoves.size() - 1);
-    const Move selected = bestMoves[dist(rng_)];
+    Move selected = bestMoves[dist(rng_)];
+    // Final safety check: ensure selected move is legal and does not leave our king in check.
+    {
+        bool legalFound = false;
+        for (const Move& m : legal) {
+            if (sameMove(m, selected)) { legalFound = true; break; }
+        }
+        if (legalFound) {
+            Board tmp = board;
+            applyMove(tmp, selected);
+            if (isKingAttacked(tmp, tmp.side)) {
+                legalFound = false;
+            }
+        }
+        if (!legalFound) {
+            if (!legal.empty()) selected = legal.front();
+            else selected = Move{};
+        }
+    }
     SearchInfo info;
     info.depth = completedDepth;
     info.scoreCp = bestScore == std::numeric_limits<int>::min() ? 0 : std::clamp(bestScore, -MateScore, MateScore);
