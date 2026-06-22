@@ -20,6 +20,7 @@ public:
     explicit OnlineLearner(Evaluator& evaluator);
 
     void setEnabled(bool enabled);
+    void setRecordOnly(bool recordOnly);
     void setLearningRate(double learningRate);
     void setWeightsPath(const std::string& path);
     void setTrainingDataPath(const std::string& path);
@@ -42,6 +43,7 @@ private:
     std::string trainingDataPath_ = "mlp_training.tsv";
     double learningRate_ = 1.5;
     bool enabled_ = true;
+    bool recordOnly_ = false;
 };
 
 } // namespace shogi

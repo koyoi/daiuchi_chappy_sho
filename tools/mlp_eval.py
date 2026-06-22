@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Tuple
 
 
-FEATURE_COUNT = 74
+FEATURE_COUNT = 98
 
 
 def import_torch():
@@ -110,7 +110,7 @@ def train(args) -> int:
     model = load_model(model_path, torch, nn, device, require_exists=False)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     loss_fn = nn.BCEWithLogitsLoss()
-    target = (y > 0).float()
+    target = y.clamp(0.0, 1.0)
 
     import sys, time
     print(f"Training: {x.shape[0]} samples, {args.epochs} epochs, "

@@ -17,8 +17,8 @@ constexpr std::array<double, FeatureCount> DefaultWeights = {
     560.0, 1150.0, 1350.0,
     115.0, 330.0, 350.0, 560.0, 660.0, 900.0, 1100.0,
     45.0, 35.0, 22.0, 30.0,
-    55.0, 42.0, 28.0, 32.0,
-    24.0, 18.0, 10.0,
+    55.0, 42.0, 0.0, 0.0,
+    0.0, 18.0, 10.0,
     35.0, 70.0, 45.0, 20.0,
     95.0, 55.0, 35.0, 180.0,
     30.0, 45.0, 45.0, 4.0,
@@ -32,6 +32,14 @@ constexpr std::array<double, FeatureCount> DefaultWeights = {
     6.0, 5.0, 8.0, 5.0,
     25.0, 35.0,
     5.0, 8.0, -5.0, -8.0,
+    -15.0, -20.0,
+    25.0, 18.0, 40.0, -8.0,
+    30.0, 20.0,
+    22.0, 18.0,
+    -10.0, 8.0, 0.0,
+    50.0, 40.0,
+    10.0,
+    60.0, 30.0, 25.0, 20.0, 120.0, -20.0, -15.0, 18.0,
 };
 
 constexpr int PstRank[PieceTypeCount][9] = {
@@ -266,6 +274,206 @@ TacticalSummary summarizeLegalMoves(Board board, Color color) {
         }
     }
     return summary;
+}
+
+struct PinInfo { int count = 0; int value = 0; };
+
+PinInfo countPins(const Board& board, Color side) {
+    const int king = side == Black ? board.blackKingSquare : board.whiteKingSquare;
+    if (king < 0) return {};
+    const int ci = side == Black ? 0 : 1;
+    const int ei = 1 - ci;
+    const Color enemy = opposite(side);
+    constexpr int dirs[][2] = {{0,-1},{0,1},{-1,0},{1,0},{-1,-1},{-1,1},{1,-1},{1,1}};
+    PinInfo info;
+    for (auto& d : dirs) {
+        int pinnedSq = -1;
+        int f = fileOf(king) + d[0];
+        int r = rankOf(king) + d[1];
+        while (inside(f, r)) {
+            int sq = idx(f, r);
+            if (board.occupied[ci].test(sq)) {
+                if (pinnedSq >= 0) break;
+                pinnedSq = sq;
+            } else if (board.occupied[ei].test(sq)) {
+                if (pinnedSq >= 0) {
+                    PieceType pt = typeOf(board.squares[sq]);
+                    bool pins = false;
+                    if (d[0] == 0 && d[1] == 0) { /* impossible */ }
+                    else if (d[0] == 0 || d[1] == 0) {
+                        pins = (pt == Rook || pt == Dragon);
+                        if (!pins && d[0] == 0) {
+                            int lanceDir = enemy == Black ? -1 : 1;
+                            if (d[1] == lanceDir) pins = (pt == Lance);
+                        }
+                    } else {
+                        pins = (pt == Bishop || pt == Horse);
+                    }
+                    if (pins) {
+                        ++info.count;
+                        info.value += pieceValue(typeOf(board.squares[pinnedSq]));
+                    }
+                }
+                break;
+            }
+            f += d[0];
+            r += d[1];
+        }
+    }
+    return info;
+}
+
+int dropTargetsNearKing(const Board& board, const AttackMap& attacks, int kingSq, Color defender) {
+    if (kingSq < 0) return 0;
+    int count = 0;
+    for (int df = -1; df <= 1; ++df) {
+        for (int dr = -1; dr <= 1; ++dr) {
+            int f = fileOf(kingSq) + df;
+            int r = rankOf(kingSq) + dr;
+            if (!inside(f, r)) continue;
+            int sq = idx(f, r);
+            if (board.squares[sq] == 0 && attackersFromMap(attacks, sq, defender) == 0)
+                ++count;
+        }
+    }
+    return count;
+}
+
+int knightCheckDropSquares(const Board& board, int enemyKingSq, Color dropper) {
+    if (enemyKingSq < 0) return 0;
+    if (hand(board, dropper)[Knight] == 0) return 0;
+    int kf = fileOf(enemyKingSq);
+    int kr = rankOf(enemyKingSq);
+    int fwd = dropper == Black ? -1 : 1;
+    int count = 0;
+    int candidates[][2] = {{kf - 1, kr - fwd * 2}, {kf + 1, kr - fwd * 2}};
+    for (auto& c : candidates) {
+        if (!inside(c[0], c[1])) continue;
+        if (!canDropOnRank(dropper, Knight, c[1])) continue;
+        int sq = idx(c[0], c[1]);
+        if (board.squares[sq] == 0) ++count;
+    }
+    return count;
+}
+
+int canDropPawnOnKingFile(const Board& board, Color dropper, int enemyKingSq) {
+    if (enemyKingSq < 0) return 0;
+    if (hand(board, dropper)[Pawn] == 0) return 0;
+    int kf = fileOf(enemyKingSq);
+    int ci = dropper == Black ? 0 : 1;
+    if (!(board.pieceBB[Pawn] & board.occupied[ci] & FileMask[kf]).empty()) return 0;
+    Bitboard fileSq = FileMask[kf];
+    while (!fileSq.empty()) {
+        int sq = fileSq.lsb();
+        fileSq.clear(sq);
+        if (board.squares[sq] == 0 && canDropOnRank(dropper, Pawn, rankOf(sq)))
+            return 1;
+    }
+    return 0;
+}
+
+int diagonalAlignmentToKing(const Board& board, Color side, int enemyKingSq) {
+    if (enemyKingSq < 0) return 0;
+    int ci = side == Black ? 0 : 1;
+    Bitboard bishops = (board.pieceBB[Bishop] | board.pieceBB[Horse]) & board.occupied[ci];
+    int count = 0;
+    while (!bishops.empty()) {
+        int sq = bishops.lsb();
+        bishops.clear(sq);
+        int df = fileOf(enemyKingSq) - fileOf(sq);
+        int dr = rankOf(enemyKingSq) - rankOf(sq);
+        if (df == 0 || dr == 0 || std::abs(df) != std::abs(dr)) continue;
+        int stepF = df > 0 ? 1 : -1;
+        int stepR = dr > 0 ? 1 : -1;
+        bool blocked = false;
+        int f = fileOf(sq) + stepF;
+        int r = rankOf(sq) + stepR;
+        while (f != fileOf(enemyKingSq) || r != rankOf(enemyKingSq)) {
+            if (board.squares[idx(f, r)] != 0) { blocked = true; break; }
+            f += stepF;
+            r += stepR;
+        }
+        if (!blocked) ++count;
+    }
+    return count;
+}
+
+int lanceAimedAtKing(const Board& board, Color side, int enemyKingSq) {
+    if (enemyKingSq < 0) return 0;
+    int ci = side == Black ? 0 : 1;
+    int kf = fileOf(enemyKingSq);
+    Bitboard lances = board.pieceBB[Lance] & board.occupied[ci] & FileMask[kf];
+    int fwd = side == Black ? -1 : 1;
+    int count = 0;
+    while (!lances.empty()) {
+        int sq = lances.lsb();
+        lances.clear(sq);
+        int lr = rankOf(sq);
+        int kr = rankOf(enemyKingSq);
+        if ((kr - lr) * fwd <= 0) continue;
+        bool blocked = false;
+        int r = lr + fwd;
+        while (r != kr) {
+            if (board.squares[idx(kf, r)] != 0) { blocked = true; break; }
+            r += fwd;
+        }
+        if (!blocked) ++count;
+    }
+    return count;
+}
+
+int pieceValueNearSquare(const Board& board, Color side, int sq, int maxDist) {
+    if (sq < 0) return 0;
+    int ci = side == Black ? 0 : 1;
+    int total = 0;
+    for (int i = 0; i < BoardSize; ++i) {
+        if (!board.occupied[ci].test(i)) continue;
+        PieceType pt = typeOf(board.squares[i]);
+        if (pt == King) continue;
+        if (chebyshevDistance(i, sq) <= maxDist)
+            total += pieceValue(pt);
+    }
+    return total;
+}
+
+int openFilesNearKing(const Board& board, Color side, int kingSq) {
+    if (kingSq < 0) return 0;
+    int ci = side == Black ? 0 : 1;
+    int kf = fileOf(kingSq);
+    int count = 0;
+    for (int f = std::max(1, kf - 1); f <= std::min(9, kf + 1); ++f) {
+        if ((board.pieceBB[Pawn] & board.occupied[ci] & FileMask[f]).empty())
+            ++count;
+    }
+    return count;
+}
+
+int passedPawns(const Board& board, Color side) {
+    int ci = side == Black ? 0 : 1;
+    int ei = 1 - ci;
+    Bitboard pawns = board.pieceBB[Pawn] & board.occupied[ci];
+    Bitboard enemyPawns = board.pieceBB[Pawn] & board.occupied[ei];
+    int count = 0;
+    while (!pawns.empty()) {
+        int sq = pawns.lsb();
+        pawns.clear(sq);
+        int f = fileOf(sq);
+        bool passed = true;
+        for (int af = std::max(1, f - 1); af <= std::min(9, f + 1); ++af) {
+            Bitboard epFile = enemyPawns & FileMask[af];
+            while (!epFile.empty()) {
+                int esq = epFile.lsb();
+                epFile.clear(esq);
+                int er = rankOf(esq);
+                int pr = rankOf(sq);
+                bool ahead = side == Black ? (er < pr) : (er > pr);
+                if (ahead) { passed = false; break; }
+            }
+            if (!passed) break;
+        }
+        if (passed) ++count;
+    }
+    return count;
 }
 
 } // namespace
@@ -677,6 +885,100 @@ FeatureVector Evaluator::extractFeatures(const Board& board, Color perspective) 
     if (enemyKing >= 0) {
         features[72] = std::abs(5 - fileOf(enemyKing));
         features[73] = perspective == Black ? rankOf(enemyKing) : 10 - rankOf(enemyKing);
+    }
+
+    // Pin detection (74-75)
+    {
+        auto ownPins = countPins(board, perspective);
+        auto enemyPins = countPins(board, enemy);
+        features[74] = ownPins.count - enemyPins.count;
+        features[75] = (ownPins.value - enemyPins.value) / 100.0;
+    }
+
+    // Drop threats (76-79)
+    {
+        int ownDropTargets = dropTargetsNearKing(board, attacks, enemyKing, enemy);
+        int enemyDropTargets = dropTargetsNearKing(board, attacks, ownKing, perspective);
+        features[76] = ownDropTargets - enemyDropTargets;
+
+        int ownGS = hand(board, perspective)[Gold] + hand(board, perspective)[Silver];
+        int enemyGS = hand(board, enemy)[Gold] + hand(board, enemy)[Silver];
+        features[77] = ownGS * ownDropTargets - enemyGS * enemyDropTargets;
+
+        features[78] = knightCheckDropSquares(board, enemyKing, perspective)
+                     - knightCheckDropSquares(board, ownKing, enemy);
+
+        features[79] = canDropPawnOnKingFile(board, perspective, enemyKing)
+                     - canDropPawnOnKingFile(board, enemy, ownKing);
+    }
+
+    // Long-range alignment (80-81)
+    {
+        features[80] = diagonalAlignmentToKing(board, perspective, enemyKing)
+                     - diagonalAlignmentToKing(board, enemy, ownKing);
+        features[81] = lanceAimedAtKing(board, perspective, enemyKing)
+                     - lanceAimedAtKing(board, enemy, ownKing);
+    }
+
+    // King area strength (82-83)
+    {
+        features[82] = (pieceValueNearSquare(board, perspective, enemyKing, 3)
+                      - pieceValueNearSquare(board, enemy, ownKing, 3)) / 100.0;
+        features[83] = (pieceValueNearSquare(board, perspective, ownKing, 2)
+                      - pieceValueNearSquare(board, enemy, enemyKing, 2)) / 100.0;
+    }
+
+    // King safety details (84-86)
+    {
+        features[84] = openFilesNearKing(board, perspective, ownKing)
+                     - openFilesNearKing(board, enemy, enemyKing);
+        int ownEdge = ownKing >= 0 && (fileOf(ownKing) == 1 || fileOf(ownKing) == 9) ? 1 : 0;
+        int enemyEdge = enemyKing >= 0 && (fileOf(enemyKing) == 1 || fileOf(enemyKing) == 9) ? 1 : 0;
+        features[85] = ownEdge - enemyEdge;
+
+        int totalMaterial = 0;
+        for (int sq = 0; sq < BoardSize; ++sq) {
+            if (board.squares[sq] != 0 && typeOf(board.squares[sq]) != King)
+                totalMaterial += pieceValue(typeOf(board.squares[sq]));
+        }
+        features[86] = totalMaterial / 1000.0;
+    }
+
+    // Piece presence & passed pawns (87-89)
+    {
+        int ownCI = perspective == Black ? 0 : 1;
+        int enemyCI = 1 - ownCI;
+        bool ownRook = !(board.pieceBB[Rook] & board.occupied[ownCI]).empty()
+                    || !(board.pieceBB[Dragon] & board.occupied[ownCI]).empty()
+                    || hand(board, perspective)[Rook] > 0;
+        bool enemyRook = !(board.pieceBB[Rook] & board.occupied[enemyCI]).empty()
+                      || !(board.pieceBB[Dragon] & board.occupied[enemyCI]).empty()
+                      || hand(board, enemy)[Rook] > 0;
+        features[87] = (ownRook ? 1 : 0) - (enemyRook ? 1 : 0);
+
+        bool ownBishop = !(board.pieceBB[Bishop] & board.occupied[ownCI]).empty()
+                      || !(board.pieceBB[Horse] & board.occupied[ownCI]).empty()
+                      || hand(board, perspective)[Bishop] > 0;
+        bool enemyBishop = !(board.pieceBB[Bishop] & board.occupied[enemyCI]).empty()
+                        || !(board.pieceBB[Horse] & board.occupied[enemyCI]).empty()
+                        || hand(board, enemy)[Bishop] > 0;
+        features[88] = (ownBishop ? 1 : 0) - (enemyBishop ? 1 : 0);
+
+        features[89] = passedPawns(board, perspective) - passedPawns(board, enemy);
+    }
+
+    // Phase-gated interaction features (90-97)
+    {
+        const double endgameness = std::clamp(board.moveNumber / 120.0, 0.0, 1.0);
+        const double openingness = 1.0 - endgameness;
+        features[90] = features[32] * endgameness;
+        features[91] = features[34] * endgameness;
+        features[92] = features[82] * endgameness;
+        features[93] = features[77] * endgameness;
+        features[94] = features[35] * endgameness;
+        features[95] = features[43] * openingness;
+        features[96] = features[53] * openingness;
+        features[97] = features[75] * endgameness;
     }
 
     return features;

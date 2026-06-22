@@ -7,7 +7,7 @@
 
 namespace shogi {
 
-constexpr int FeatureCount = 74;
+constexpr int FeatureCount = 98;
 using FeatureVector = std::array<double, FeatureCount>;
 
 class Evaluator {

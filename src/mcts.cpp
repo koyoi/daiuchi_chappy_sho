@@ -168,7 +168,7 @@ MCTSResult MCTSEngine::search(const Board& board, const MCTSConfig& config,
             NNOutput out = nn_.evaluate(leafBoard);
             value = -out.value;
         } else {
-            value = leaf->children.empty() ? -1.0 : 0.0;
+            value = leaf->children.empty() ? 1.0 : 0.0;
         }
 
         backpropagate(leaf, value);

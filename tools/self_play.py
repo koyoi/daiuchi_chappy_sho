@@ -54,6 +54,7 @@ class USIEngine:
             if line.strip() == "usiok":
                 break
 
+        self._send("setoption name RecordOnly value true")
         if self.model:
             self._send(f"setoption name NNModel value {self.model}")
         if self.python:

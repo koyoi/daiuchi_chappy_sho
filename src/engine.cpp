@@ -25,7 +25,9 @@ namespace shogi {
 namespace {
 
 constexpr int MateScore = 100000;
-constexpr int QuiescenceDepth = 2;
+constexpr int QuiescenceDepth = 6;
+constexpr int DeltaMargin = 1400;
+constexpr int QCheckDepthMin = 4;
 constexpr int ExactScore = 0;
 constexpr int LowerBound = 1;
 constexpr int UpperBound = 2;
@@ -390,6 +392,10 @@ void LearningEngine::setLearningEnabled(bool enabled) {
     learner_.setEnabled(enabled);
 }
 
+void LearningEngine::setRecordOnly(bool recordOnly) {
+    learner_.setRecordOnly(recordOnly);
+}
+
 void LearningEngine::setSearchDepth(int depth) {
     searchDepth_ = std::clamp(depth, 0, 128);
 }
@@ -577,11 +583,20 @@ int LearningEngine::quiescence(Board& board, int depth, int alpha, int beta, Col
         if (standPat >= beta) {
             return standPat;
         }
+        if (!inCheck && standPat + DeltaMargin <= alpha) {
+            return standPat;
+        }
         alpha = std::max(alpha, standPat);
         int best = standPat;
         for (const Move& move : legal) {
-            if (!inCheck && !isTacticalMove(board, move)) {
-                continue;
+            if (!inCheck) {
+                const bool capture = !move.isDrop() && board.squares[move.to] != 0;
+                const bool promotion = move.promote;
+                if (!capture && !promotion) {
+                    if (depth < QCheckDepthMin || !givesCheck(board, move)) {
+                        continue;
+                    }
+                }
             }
             UndoInfo undo;
             applyMove(board, move, undo);
@@ -598,11 +613,20 @@ int LearningEngine::quiescence(Board& board, int depth, int alpha, int beta, Col
     if (standPat <= alpha) {
         return standPat;
     }
+    if (!inCheck && standPat - DeltaMargin >= beta) {
+        return standPat;
+    }
     beta = std::min(beta, standPat);
     int best = standPat;
     for (const Move& move : legal) {
-        if (!inCheck && !isTacticalMove(board, move)) {
-            continue;
+        if (!inCheck) {
+            const bool capture = !move.isDrop() && board.squares[move.to] != 0;
+            const bool promotion = move.promote;
+            if (!capture && !promotion) {
+                if (depth < QCheckDepthMin || !givesCheck(board, move)) {
+                    continue;
+                }
+            }
         }
         UndoInfo undo;
         applyMove(board, move, undo);

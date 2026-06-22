@@ -127,6 +127,8 @@ void handleSetOption(LearningEngine& engine, const std::vector<std::string>& wor
         engine.setHeavyEvaluation(value != "false" && value != "0");
     } else if (name == "OpeningSafety") {
         engine.setOpeningSafety(value != "false" && value != "0");
+    } else if (name == "RecordOnly") {
+        engine.setRecordOnly(value != "false" && value != "0");
     } else if (name == "WeightsFile") {
         engine.setWeightsPath(value);
     } else if (name == "TrainingDataFile") {
@@ -245,6 +247,7 @@ void usiLoop() {
             std::cout << "option name Threads type spin default " << engine.threadCount() << " min 1 max 256" << std::endl;
             std::cout << "option name HeavyEvaluation type check default false" << std::endl;
             std::cout << "option name OpeningSafety type check default true" << std::endl;
+            std::cout << "option name RecordOnly type check default false" << std::endl;
             std::cout << "option name WeightsFile type string default random-shogi.weights" << std::endl;
             std::cout << "option name TrainingDataFile type string default mlp_training.tsv" << std::endl;
             std::cout << "option name MlpWeightsFile type string default " << std::endl;

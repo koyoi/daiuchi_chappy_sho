@@ -28,6 +28,7 @@ public:
     void clearGame();
 
     void setLearningEnabled(bool enabled);
+    void setRecordOnly(bool recordOnly);
     void setSearchDepth(int depth);
     void setMaxMoveTimeMs(int milliseconds);
     void setHeavyEvaluation(bool enabled);

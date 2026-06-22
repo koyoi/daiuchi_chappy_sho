@@ -15,6 +15,10 @@ void OnlineLearner::setEnabled(bool enabled) {
     enabled_ = enabled;
 }
 
+void OnlineLearner::setRecordOnly(bool recordOnly) {
+    recordOnly_ = recordOnly;
+}
+
 void OnlineLearner::setLearningRate(double learningRate) {
     learningRate_ = learningRate;
 }
@@ -102,14 +106,20 @@ void OnlineLearner::finishGame(int engineResult, Color engineSide) {
         const FeatureVector delta = chosen - baseline;
 
         const double outcomeForMover = ply.mover == winner ? 1.0 : -1.0;
-        const double actorScale = ply.engineMove ? 1.0 : 0.65;
         const double progress = game_.size() <= 1 ? 1.0 : static_cast<double>(i) / static_cast<double>(game_.size() - 1);
-        const double recencyScale = 0.35 + 1.65 * progress;
-        evaluator_.applyDelta(delta, learningRate_ * actorScale * recencyScale * outcomeForMover);
-        appendTrainingSample(outcomeForMover, chosen);
+        if (!recordOnly_) {
+            const double actorScale = ply.engineMove ? 1.0 : 0.65;
+            const double recencyScale = 0.35 + 1.65 * progress;
+            evaluator_.applyDelta(delta, learningRate_ * actorScale * recencyScale * outcomeForMover);
+        }
+        const double confidence = 0.55 + 0.40 * progress;
+        const double smoothLabel = outcomeForMover > 0 ? confidence : (1.0 - confidence);
+        appendTrainingSample(smoothLabel, chosen);
     }
 
-    saveWeights();
+    if (!recordOnly_) {
+        saveWeights();
+    }
     clearGame();
 }
 
