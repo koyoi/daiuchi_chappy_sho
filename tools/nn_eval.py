@@ -61,7 +61,7 @@ class ShogiTransformer:
     """Wrapper that builds the model lazily (after torch is imported)."""
 
     @staticmethod
-    def build(nn, d_model=128, nhead=8, num_layers=4, dim_ff=256):
+    def build(nn, d_model=128, nhead=8, num_layers=4, dim_ff=512):
         return ShogiTransformerModel(nn, d_model, nhead, num_layers, dim_ff)
 
 

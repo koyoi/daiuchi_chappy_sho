@@ -26,7 +26,7 @@ public:
     const std::string& weightsPath() const;
     const std::string& trainingDataPath() const;
 
-    void loadWeights();
+    bool loadWeights();
     void saveWeights() const;
     void clearGame();
     void recordMove(const Board& before, const Move& move, bool engineMove);

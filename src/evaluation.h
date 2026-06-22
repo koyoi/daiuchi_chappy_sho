@@ -12,8 +12,8 @@ using FeatureVector = std::array<double, FeatureCount>;
 
 class Evaluator {
 public:
-    static constexpr int MlpHidden1 = 64;
-    static constexpr int MlpHidden2 = 32;
+    static constexpr int MlpHidden1 = 128;
+    static constexpr int MlpHidden2 = 64;
 
     Evaluator();
 

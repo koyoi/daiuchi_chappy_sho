@@ -39,8 +39,8 @@ const std::string& OnlineLearner::trainingDataPath() const {
     return trainingDataPath_;
 }
 
-void OnlineLearner::loadWeights() {
-    evaluator_.load(weightsPath_);
+bool OnlineLearner::loadWeights() {
+    return evaluator_.load(weightsPath_);
 }
 
 void OnlineLearner::saveWeights() const {

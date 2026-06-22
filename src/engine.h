@@ -36,8 +36,9 @@ public:
     int threadCount() const;
     void setWeightsPath(const std::string& path);
     void setTrainingDataPath(const std::string& path);
-    void loadWeights();
+    bool loadWeights();
     bool loadMlpWeights(const std::string& path);
+    const std::string& weightsPath() const;
     void setRootPruneWidth(int width);
     SearchInfo lastSearchInfo() const;
 

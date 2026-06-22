@@ -20,7 +20,7 @@ Floodgate CSA 棋譜 (kifu/floodgate/*.csa)
 | エンジン | 学習スクリプト | モデルファイル | 評価方式 |
 |---------|-------------|-------------|---------|
 | Classic (αβ探索 線形) | `train_classic.py` | `random-shogi.weights` | 74次元線形 |
-| Classic (αβ探索 MLP) | `train_mlp.py` | `mlp.weights` | MLP (74→64→32→1) |
+| Classic (αβ探索 MLP) | `train_mlp.py` | `mlp.weights` | MLP (74→128→64→1) |
 | MCTS (Transformer) | `train.py` | `nn_model.pt` | Transformer (方策+価値) |
 
 ---
@@ -103,7 +103,7 @@ python tools/train_mlp.py \
 2. `kishi-to-classic --extract-features` で 74 次元特徴量を抽出
    - 正解手の局面 → ラベル +1.0
    - ランダムな不正解手の局面 → ラベル -1.0
-3. `mlp_eval.py train` で MLP (74→64→32→1) を BCEWithLogitsLoss で学習
+3. `mlp_eval.py train` で MLP (74→128→64→1) を BCEWithLogitsLoss で学習
 4. `mlp_model.pt` に保存
 5. `export_mlp.py` で `mlp.weights`（テキスト形式）にエクスポート
 
