@@ -45,6 +45,8 @@ void initAttackTables() {
             }
             addStepBit(BlackStepAttacks[t], sq, -1, 0);
             addStepBit(BlackStepAttacks[t], sq, 1, 0);
+            addStepBit(WhiteStepAttacks[t], sq, -1, 0);
+            addStepBit(WhiteStepAttacks[t], sq, 1, 0);
             addStepBit(BlackStepAttacks[t], sq, 0, 1);
             addStepBit(WhiteStepAttacks[t], sq, 0, -1);
         }
@@ -367,6 +369,7 @@ MoveList generatePseudoMoves(const Board& board) {
 }
 
 MoveList generateLegalMoves(const Board& board, bool enforcePawnDropMate) {
+
     Board temp = board;
     const Color mover = board.side;
     MoveList pseudo = generatePseudoMoves(board);
