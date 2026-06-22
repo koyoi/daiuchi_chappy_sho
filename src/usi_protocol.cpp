@@ -131,18 +131,6 @@ void handleSetOption(LearningEngine& engine, const std::vector<std::string>& wor
         engine.setWeightsPath(value);
     } else if (name == "TrainingDataFile") {
         engine.setTrainingDataPath(value);
-    } else if (name == "UseGpu") {
-        engine.setGpuEnabled(value == "true" || value == "1");
-    } else if (name == "GpuTrainOnGameEnd") {
-        engine.setGpuTrainOnGameEnd(value == "true" || value == "1");
-    } else if (name == "GpuPython") {
-        engine.setGpuPython(value);
-    } else if (name == "GpuScript") {
-        engine.setGpuScript(value);
-    } else if (name == "GpuModel") {
-        engine.setGpuModel(value);
-    } else if (name == "GpuDevice") {
-        engine.setGpuDevice(value);
     }
 }
 
@@ -246,16 +234,6 @@ void usiLoop() {
             std::cout << "option name OpeningSafety type check default true" << std::endl;
             std::cout << "option name WeightsFile type string default random-shogi.weights" << std::endl;
             std::cout << "option name TrainingDataFile type string default gpu_training.tsv" << std::endl;
-            std::cout << "option name UseGpu type check default false" << std::endl;
-            std::cout << "option name GpuTrainOnGameEnd type check default false" << std::endl;
-#ifdef _WIN32
-            std::cout << "option name GpuPython type string default ..\\..\\.venv\\Scripts\\python.exe" << std::endl;
-#else
-            std::cout << "option name GpuPython type string default python" << std::endl;
-#endif
-            std::cout << "option name GpuScript type string default tools/gpu_eval.py" << std::endl;
-            std::cout << "option name GpuModel type string default gpu_model.pt" << std::endl;
-            std::cout << "option name GpuDevice type string default auto" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
             std::cout << "readyok" << std::endl;

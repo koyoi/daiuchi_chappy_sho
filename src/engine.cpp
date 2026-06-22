@@ -260,38 +260,6 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
         return Move{};
     }
 
-    Move gpuMove;
-    if (chooseMoveByGpu(board, legal, gpuMove)) {
-        // Validate GPU-picked move: ensure it's among legal moves and doesn't leave king in check.
-        Move candidate = gpuMove;
-        bool legalFound = false;
-        for (const Move& m : legal) {
-            if (sameMove(m, candidate)) {
-                legalFound = true;
-                break;
-            }
-        }
-        if (legalFound) {
-            Board tmp = board;
-            applyMove(tmp, candidate);
-            if (isKingAttacked(tmp, tmp.side)) {
-                legalFound = false;
-            }
-        }
-        if (!legalFound) {
-            if (!legal.empty()) candidate = legal.front();
-            else candidate = Move{};
-        }
-        SearchInfo info;
-        info.depth = 1;
-        info.nodes = static_cast<std::uint64_t>(legal.size());
-        info.timeMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - searchStart).count());
-        info.bestMove = candidate;
-        info.hasBestMove = candidate.to >= 0;
-        setLastSearchInfo(info);
-        return candidate;
-    }
-
     const Color rootSide = board.side;
     orderMoves(board, legal, rootSide);
 
@@ -392,7 +360,6 @@ void LearningEngine::recordMove(const Board& before, const Move& move, bool engi
 
 void LearningEngine::finishGame(int engineResult, Color engineSide) {
     learner_.finishGame(engineResult, engineSide);
-    gpu_.train(learner_.trainingDataPath());
 }
 
 void LearningEngine::clearGame() {
@@ -436,30 +403,6 @@ void LearningEngine::setTrainingDataPath(const std::string& path) {
     learner_.setTrainingDataPath(path);
 }
 
-void LearningEngine::setGpuEnabled(bool enabled) {
-    gpu_.setEnabled(enabled);
-}
-
-void LearningEngine::setGpuTrainOnGameEnd(bool enabled) {
-    gpu_.setTrainOnGameEnd(enabled);
-}
-
-void LearningEngine::setGpuPython(const std::string& python) {
-    gpu_.setPython(python);
-}
-
-void LearningEngine::setGpuScript(const std::string& script) {
-    gpu_.setScript(script);
-}
-
-void LearningEngine::setGpuModel(const std::string& model) {
-    gpu_.setModel(model);
-}
-
-void LearningEngine::setGpuDevice(const std::string& device) {
-    gpu_.setDevice(device);
-}
-
 void LearningEngine::loadWeights() {
     learner_.loadWeights();
 }
@@ -467,40 +410,6 @@ void LearningEngine::loadWeights() {
 SearchInfo LearningEngine::lastSearchInfo() const {
     std::lock_guard<std::mutex> lock(lastSearchInfoMutex_);
     return lastSearchInfo_;
-}
-
-bool LearningEngine::chooseMoveByGpu(const Board& board, const MoveList& legal, Move& selected) {
-    std::vector<FeatureVector> features;
-    features.reserve(legal.size());
-    for (const Move& move : legal) {
-        Board next = board;
-        applyMove(next, move);
-        features.push_back(evaluator_.extractFeatures(next, board.side));
-    }
-
-    std::vector<int> scores;
-    if (!gpu_.score(features, scores)) {
-        return false;
-    }
-
-    int bestScore = std::numeric_limits<int>::min();
-    std::vector<Move> bestMoves;
-    for (int i = 0; i < legal.size(); ++i) {
-        const int adjustedScore = scores[i] - (openingSafety_ ? openingTrapPenalty(board, legal[i], board.side) : 0);
-        if (adjustedScore > bestScore) {
-            bestScore = adjustedScore;
-            bestMoves.clear();
-            bestMoves.push_back(legal[i]);
-        } else if (adjustedScore == bestScore) {
-            bestMoves.push_back(legal[i]);
-        }
-    }
-    if (bestMoves.empty()) {
-        return false;
-    }
-    std::uniform_int_distribution<std::size_t> dist(0, bestMoves.size() - 1);
-    selected = bestMoves[dist(rng_)];
-    return true;
 }
 
 int LearningEngine::search(Board& board, int depth, int alpha, int beta, Color rootSide) const {

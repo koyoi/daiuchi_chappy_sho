@@ -1,7 +1,6 @@
 #pragma once
 
 #include "evaluation.h"
-#include "gpu_bridge.h"
 #include "learning.h"
 #include "search_types.h"
 #include "shogi_types.h"
@@ -37,12 +36,6 @@ public:
     int threadCount() const;
     void setWeightsPath(const std::string& path);
     void setTrainingDataPath(const std::string& path);
-    void setGpuEnabled(bool enabled);
-    void setGpuTrainOnGameEnd(bool enabled);
-    void setGpuPython(const std::string& python);
-    void setGpuScript(const std::string& script);
-    void setGpuModel(const std::string& model);
-    void setGpuDevice(const std::string& device);
     void loadWeights();
     SearchInfo lastSearchInfo() const;
 
@@ -52,7 +45,6 @@ private:
     int quiescence(Board& board, int depth, int alpha, int beta, Color rootSide) const;
     bool canForceMate(Board& board, int depth, Color attacker) const;
     bool isTacticalMove(const Board& board, const Move& move) const;
-    bool chooseMoveByGpu(const Board& board, const MoveList& legal, Move& selected);
     std::vector<int> scoreRootMovesParallel(
         const Board& board,
         const MoveList& orderedMoves,
@@ -84,7 +76,6 @@ private:
 
     Evaluator evaluator_;
     OnlineLearner learner_;
-    GpuBridge gpu_;
     mutable std::vector<TranspositionEntry> transposition_;
     mutable std::array<std::mutex, LockCount> transpositionMutex_;
     mutable std::uint8_t ttGeneration_{0};
