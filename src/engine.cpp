@@ -355,7 +355,7 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
         if (legalFound) {
             Board tmp = board;
             applyMove(tmp, selected);
-            if (isKingAttacked(tmp, tmp.side)) {
+            if (isKingAttacked(tmp, opposite(tmp.side))) {
                 legalFound = false;
             }
         }
