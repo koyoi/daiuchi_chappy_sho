@@ -279,7 +279,7 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
         const std::uint64_t nodesBeforeDepth = nodes_.load();
         const std::vector<int> scores = scoreRootMovesParallel(board, legal, openingPenalties, rootSide, depth, pruneWidth, searchStart, infoCallback);
 
-        if (shouldStop() && nodes_.load() == nodesBeforeDepth) {
+        if (shouldStop()) {
             break;
         }
 
