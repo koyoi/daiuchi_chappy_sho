@@ -46,7 +46,7 @@ def pick_device(torch_mod, requested: str):
     return torch_mod.device(requested)
 
 
-def build_model(nn, d_model=128, nhead=8, num_layers=4, dim_ff=256):
+def build_model(nn, d_model=128, nhead=8, num_layers=4, dim_ff=512):
     """Build ShogiTransformer (same as nn_eval.py)."""
     import torch
     import torch.nn.functional as F

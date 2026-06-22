@@ -131,6 +131,15 @@ void mctsUsiLoop() {
             std::cout << "option name NNDevice type string default auto" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
+            if (!engine.ensureNN()) {
+                std::cout << "info string ERROR: failed to start NN process for model: "
+                          << engine.nnModelPath() << std::endl;
+                if (!engine.nnLastError().empty()) {
+                    std::cout << "info string  -> " << engine.nnLastError() << std::endl;
+                }
+            } else {
+                std::cout << "info string NN model loaded: " << engine.nnModelPath() << std::endl;
+            }
             std::cout << "readyok" << std::endl;
         } else if (command == "setoption") {
             handleSetOption(engine, words);

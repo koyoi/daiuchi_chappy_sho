@@ -27,6 +27,9 @@ public:
     void setNNScript(const std::string& script);
     void setNNModel(const std::string& model);
     void setNNDevice(const std::string& device);
+    bool ensureNN();
+    const std::string& nnLastError() const;
+    const std::string& nnModelPath() const;
     SearchInfo lastSearchInfo() const;
 
 private:

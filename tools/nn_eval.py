@@ -203,7 +203,12 @@ def load_model(model_path, torch_mod, nn, device, require_exists=True):
             raise FileNotFoundError(model_path)
         return model
     state = torch_mod.load(model_path, map_location=device, weights_only=True)
-    model.load_state_dict(state)
+    try:
+        model.load_state_dict(state)
+    except RuntimeError as e:
+        _log(f"ERROR: failed to load model weights: {e}")
+        _log("Using random weights instead. Retrain with matching architecture.")
+        return model
     return model
 
 

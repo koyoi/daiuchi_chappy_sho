@@ -49,10 +49,13 @@ public:
 
     bool ensureProcess();
     void shutdown();
+    const std::string& lastError() const { return lastError_; }
+    const std::string& modelPath() const { return settings_.model; }
 
 private:
     bool sendLine(const std::string& line);
     std::string recvLine();
+    std::string recvLine(int timeoutMs);
     NNOutput makeFallbackOutput() const;
 
     NNBridgeSettings settings_;
@@ -68,6 +71,7 @@ private:
     int childPid_ = -1;
 #endif
     bool processRunning_ = false;
+    std::string lastError_;
 };
 
 } // namespace shogi

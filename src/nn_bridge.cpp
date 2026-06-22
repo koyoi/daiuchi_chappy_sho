@@ -14,6 +14,7 @@
 #endif
 #include <windows.h>
 #else
+#include <poll.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -179,6 +180,7 @@ bool NNBridge::ensureProcess() {
     if (!ok) {
         CloseHandle(stdinWrite);
         CloseHandle(stdoutRead);
+        lastError_ = "failed to start Python process: " + cmd;
         return false;
     }
 
@@ -190,7 +192,13 @@ bool NNBridge::ensureProcess() {
 
     // Wait for "ready" line
     std::string ready = recvLine();
-    return ready.find("ready") != std::string::npos;
+    if (ready.find("ready") == std::string::npos) {
+        lastError_ = "Python process did not respond with 'ready' (model load may have failed)";
+        shutdown();
+        return false;
+    }
+    lastError_.clear();
+    return true;
 }
 
 void NNBridge::shutdown() {
@@ -231,12 +239,16 @@ bool NNBridge::ensureProcess() {
     if (!settings_.enabled) return false;
 
     int stdinPipe[2], stdoutPipe[2];
-    if (pipe(stdinPipe) != 0 || pipe(stdoutPipe) != 0) return false;
+    if (pipe(stdinPipe) != 0 || pipe(stdoutPipe) != 0) {
+        lastError_ = "pipe() failed";
+        return false;
+    }
 
     pid_t pid = fork();
     if (pid < 0) {
         close(stdinPipe[0]); close(stdinPipe[1]);
         close(stdoutPipe[0]); close(stdoutPipe[1]);
+        lastError_ = "fork() failed";
         return false;
     }
 
@@ -260,15 +272,25 @@ bool NNBridge::ensureProcess() {
     childPid_ = pid;
     processRunning_ = true;
 
-    std::string ready = recvLine();
-    return ready.find("ready") != std::string::npos;
+    std::string ready = recvLine(30000);
+    if (ready.find("ready") == std::string::npos) {
+        lastError_ = "Python process did not respond with 'ready' (model load may have failed)";
+        shutdown();
+        return false;
+    }
+    lastError_.clear();
+    return true;
 }
 
 void NNBridge::shutdown() {
     if (!processRunning_) return;
-    sendLine("quit");
-    int status;
-    waitpid(childPid_, &status, 0);
+    // Check if child is still alive before writing
+    int wstatus;
+    pid_t ret = waitpid(childPid_, &wstatus, WNOHANG);
+    if (ret == 0) {
+        sendLine("quit");
+        waitpid(childPid_, &wstatus, 0);
+    }
     close(childStdinFd_);
     close(childStdoutFd_);
     childStdinFd_ = -1;
@@ -283,9 +305,21 @@ bool NNBridge::sendLine(const std::string& line) {
 }
 
 std::string NNBridge::recvLine() {
+    return recvLine(-1);
+}
+
+std::string NNBridge::recvLine(int timeoutMs) {
     std::string result;
     char ch;
-    while (read(childStdoutFd_, &ch, 1) == 1) {
+    while (true) {
+        if (timeoutMs >= 0) {
+            struct pollfd pfd{};
+            pfd.fd = childStdoutFd_;
+            pfd.events = POLLIN;
+            int ret = poll(&pfd, 1, timeoutMs);
+            if (ret <= 0) break;
+        }
+        if (read(childStdoutFd_, &ch, 1) != 1) break;
         if (ch == '\n') break;
         if (ch != '\r') result += ch;
     }
