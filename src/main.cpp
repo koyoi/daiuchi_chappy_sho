@@ -35,6 +35,10 @@ int main(int argc, char** argv) {
             learnConfig.learningRate = std::stod(argv[++i]);
         } else if (arg == "--epochs" && i + 1 < argc) {
             learnConfig.epochs = std::stoi(argv[++i]);
+        } else if (arg == "--batch-size" && i + 1 < argc) {
+            learnConfig.batchSize = std::stoi(argv[++i]);
+        } else if (arg == "--temperature" && i + 1 < argc) {
+            learnConfig.temperature = std::stod(argv[++i]);
         }
     }
 

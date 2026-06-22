@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import List, Optional
 
@@ -183,6 +184,13 @@ def parse_game_for_classic(filepath: Path, min_rate: int = 0,
     return samples
 
 
+def _parse_worker(args_tuple):
+    filepath, min_rate, skip_opening, sample_rate = args_tuple
+    return parse_game_for_classic(Path(filepath), min_rate=min_rate,
+                                  skip_opening=skip_opening,
+                                  sample_rate=sample_rate)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Train classic engine evaluation from Floodgate kifu (Bonanza method)")
@@ -202,6 +210,8 @@ def main():
                         help="Learning rate (default: 0.01)")
     parser.add_argument("--epochs", type=int, default=1,
                         help="Training epochs (default: 1)")
+    parser.add_argument("--temperature", type=float, default=100.0,
+                        help="Softmax temperature (default: 100)")
     args = parser.parse_args()
 
     kifu_dir = Path(args.kifu)
@@ -211,24 +221,24 @@ def main():
     if args.max_games > 0:
         csa_files = csa_files[:args.max_games]
 
-    # Generate training data
-    print("Generating training data...", file=sys.stderr)
+    # Generate training data (parallel)
+    workers = max(1, os.cpu_count() or 1)
+    print(f"Generating training data ({workers} workers)...", file=sys.stderr)
     all_samples = []
     games_ok = 0
     skipped = 0
 
-    for filepath in tqdm(csa_files, desc="Parsing kifu", unit="file",
-                         file=sys.stderr):
-        samples = parse_game_for_classic(
-            filepath, min_rate=args.min_rate,
-            skip_opening=args.skip_opening,
-            sample_rate=args.sample_rate,
-        )
-        if samples is None:
-            skipped += 1
-            continue
-        all_samples.extend(samples)
-        games_ok += 1
+    work_args = [(str(f), args.min_rate, args.skip_opening, args.sample_rate)
+                 for f in csa_files]
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        for samples in tqdm(executor.map(_parse_worker, work_args, chunksize=16),
+                            total=len(csa_files), desc="Parsing kifu",
+                            unit="file", file=sys.stderr):
+            if samples is None:
+                skipped += 1
+                continue
+            all_samples.extend(samples)
+            games_ok += 1
 
     print(f"Parsed {games_ok} games, {len(all_samples)} training positions "
           f"(skipped {skipped})", file=sys.stderr)
@@ -255,6 +265,7 @@ def main():
         "--weights", str(Path(args.weights).resolve()),
         "--lr", str(args.lr),
         "--epochs", str(args.epochs),
+        "--temperature", str(args.temperature),
     ]
     print(f"Running: {' '.join(cmd)}", file=sys.stderr)
     result = subprocess.run(cmd, stderr=sys.stderr)

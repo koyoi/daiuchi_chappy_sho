@@ -9,7 +9,8 @@ struct KifuLearnConfig {
     std::string weightsPath = "random-shogi.weights";
     double learningRate = 0.01;
     int epochs = 1;
-    int saveInterval = 10000;
+    int batchSize = 256;
+    double temperature = 100.0;
 };
 
 int learnFromKifu(const KifuLearnConfig& config);
