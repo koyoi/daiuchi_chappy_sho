@@ -131,6 +131,15 @@ void handleSetOption(LearningEngine& engine, const std::vector<std::string>& wor
         engine.setWeightsPath(value);
     } else if (name == "TrainingDataFile") {
         engine.setTrainingDataPath(value);
+    } else if (name == "MlpWeightsFile") {
+        if (!value.empty()) {
+            engine.loadMlpWeights(value);
+        }
+    } else if (name == "RootPruneWidth") {
+        try {
+            engine.setRootPruneWidth(std::stoi(value));
+        } catch (...) {
+        }
     }
 }
 
@@ -233,7 +242,9 @@ void usiLoop() {
             std::cout << "option name HeavyEvaluation type check default false" << std::endl;
             std::cout << "option name OpeningSafety type check default true" << std::endl;
             std::cout << "option name WeightsFile type string default random-shogi.weights" << std::endl;
-            std::cout << "option name TrainingDataFile type string default gpu_training.tsv" << std::endl;
+            std::cout << "option name TrainingDataFile type string default mlp_training.tsv" << std::endl;
+            std::cout << "option name MlpWeightsFile type string default " << std::endl;
+            std::cout << "option name RootPruneWidth type spin default 15 min 0 max 256" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
             std::cout << "readyok" << std::endl;

@@ -112,17 +112,47 @@ def train(args) -> int:
     loss_fn = nn.BCEWithLogitsLoss()
     target = (y > 0).float()
 
+    import sys, time
+    print(f"Training: {x.shape[0]} samples, {args.epochs} epochs, "
+          f"batch={args.batch_size}, lr={args.lr}, device={device}", file=sys.stderr)
+
     model.train()
-    for _ in range(args.epochs):
+    for epoch in range(args.epochs):
         permutation = torch.randperm(x.shape[0], device=device)
-        for start in range(0, x.shape[0], args.batch_size):
+        epoch_loss = 0.0
+        n_batches = 0
+        correct = 0
+        total = 0
+        t0 = time.time()
+        num_batches = (x.shape[0] + args.batch_size - 1) // args.batch_size
+        for batch_i, start in enumerate(range(0, x.shape[0], args.batch_size)):
             index = permutation[start : start + args.batch_size]
             batch_x = x[index]
             batch_y = target[index]
             optimizer.zero_grad(set_to_none=True)
-            loss = loss_fn(model(batch_x), batch_y)
+            logits = model(batch_x)
+            loss = loss_fn(logits, batch_y)
             loss.backward()
             optimizer.step()
+            epoch_loss += loss.item()
+            n_batches += 1
+            preds = (logits > 0).float()
+            correct += (preds == batch_y).sum().item()
+            total += batch_y.shape[0]
+            if (batch_i + 1) % 100 == 0 or batch_i + 1 == num_batches:
+                elapsed = time.time() - t0
+                avg_loss = epoch_loss / n_batches
+                acc = 100.0 * correct / total if total > 0 else 0.0
+                print(f"\r  epoch {epoch+1}/{args.epochs}: "
+                      f"{batch_i+1}/{num_batches} batches | "
+                      f"loss={avg_loss:.4f} acc={acc:.1f}% "
+                      f"({elapsed:.1f}s)", end="", file=sys.stderr)
+        elapsed = time.time() - t0
+        avg_loss = epoch_loss / n_batches if n_batches > 0 else 0.0
+        acc = 100.0 * correct / total if total > 0 else 0.0
+        print(f"\r  epoch {epoch+1}/{args.epochs}: "
+              f"loss={avg_loss:.4f} acc={acc:.1f}% ({elapsed:.1f}s)          ",
+              file=sys.stderr)
 
     model_path.parent.mkdir(parents=True, exist_ok=True) if model_path.parent != Path("") else None
     torch.save(model.state_dict(), model_path)
@@ -136,13 +166,13 @@ def main() -> int:
     score_parser = subparsers.add_parser("score")
     score_parser.add_argument("--input", required=True)
     score_parser.add_argument("--output", required=True)
-    score_parser.add_argument("--model", default="gpu_model.pt")
+    score_parser.add_argument("--model", default="mlp_model.pt")
     score_parser.add_argument("--device", default="auto")
     score_parser.set_defaults(func=score)
 
     train_parser = subparsers.add_parser("train")
     train_parser.add_argument("--data", required=True)
-    train_parser.add_argument("--model", default="gpu_model.pt")
+    train_parser.add_argument("--model", default="mlp_model.pt")
     train_parser.add_argument("--device", default="auto")
     train_parser.add_argument("--epochs", type=int, default=3)
     train_parser.add_argument("--batch-size", type=int, default=512)

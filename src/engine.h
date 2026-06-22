@@ -37,6 +37,8 @@ public:
     void setWeightsPath(const std::string& path);
     void setTrainingDataPath(const std::string& path);
     void loadWeights();
+    bool loadMlpWeights(const std::string& path);
+    void setRootPruneWidth(int width);
     SearchInfo lastSearchInfo() const;
 
 private:
@@ -51,6 +53,7 @@ private:
         const std::vector<int>& openingPenalties,
         Color rootSide,
         int depth,
+        int pruneWidth,
         const std::chrono::steady_clock::time_point& searchStart,
         const InfoCallback& infoCallback) const;
     void orderMoves(const Board& board, MoveList& moves, Color rootSide) const;
@@ -89,6 +92,7 @@ private:
     std::mt19937 rng_;
     int searchDepth_ = 0;
     bool openingSafety_ = true;
+    int rootPruneWidth_ = 15;
 };
 
 } // namespace shogi

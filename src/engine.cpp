@@ -274,9 +274,10 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
     int bestScore = std::numeric_limits<int>::min();
     std::vector<Move> bestMoves;
     const int maxDepth = depthLimit();
+    const int pruneWidth = rootPruneWidth_;
     for (int depth = 1; depth <= maxDepth && !shouldStop(); ++depth) {
         const std::uint64_t nodesBeforeDepth = nodes_.load();
-        const std::vector<int> scores = scoreRootMovesParallel(board, legal, openingPenalties, rootSide, depth, searchStart, infoCallback);
+        const std::vector<int> scores = scoreRootMovesParallel(board, legal, openingPenalties, rootSide, depth, pruneWidth, searchStart, infoCallback);
 
         if (shouldStop() && nodes_.load() == nodesBeforeDepth) {
             break;
@@ -317,6 +318,26 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
             if (infoCallback) {
                 infoCallback(info);
             }
+
+            // Reorder root moves by score for next iteration (best first)
+            struct IndexedScore { int index; int score; };
+            std::vector<IndexedScore> ranked(legal.size());
+            for (int i = 0; i < static_cast<int>(legal.size()); ++i) {
+                ranked[i] = {i, scores[i]};
+            }
+            std::stable_sort(ranked.begin(), ranked.end(), [](const IndexedScore& a, const IndexedScore& b) {
+                return a.score > b.score;
+            });
+            MoveList reordered;
+            std::vector<int> reorderedPenalties(openingPenalties.size(), 0);
+            for (int i = 0; i < static_cast<int>(ranked.size()); ++i) {
+                reordered.push_back(legal[ranked[i].index]);
+                if (ranked[i].index < static_cast<int>(openingPenalties.size())) {
+                    reorderedPenalties[i] = openingPenalties[ranked[i].index];
+                }
+            }
+            legal = reordered;
+            openingPenalties = reorderedPenalties;
         }
     }
 
@@ -405,6 +426,14 @@ void LearningEngine::setTrainingDataPath(const std::string& path) {
 
 void LearningEngine::loadWeights() {
     learner_.loadWeights();
+}
+
+bool LearningEngine::loadMlpWeights(const std::string& path) {
+    return evaluator_.loadMlp(path);
+}
+
+void LearningEngine::setRootPruneWidth(int width) {
+    rootPruneWidth_ = std::max(0, width);
 }
 
 SearchInfo LearningEngine::lastSearchInfo() const {
@@ -641,6 +670,7 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
     const std::vector<int>& openingPenalties,
     Color rootSide,
     int depth,
+    int pruneWidth,
     const std::chrono::steady_clock::time_point& searchStart,
     const InfoCallback& infoCallback) const {
     std::vector<int> scores(orderedMoves.size(), std::numeric_limits<int>::min());
@@ -698,7 +728,11 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
             }
             Board next = board;
             applyMove(next, orderedMoves[i]);
-            scores[i] = search(next, depth - 1, -MateScore, MateScore, rootSide);
+            int searchDepth = depth - 1;
+            if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) {
+                searchDepth = std::max(0, depth - 3);
+            }
+            scores[i] = search(next, searchDepth, -MateScore, MateScore, rootSide);
             if (i < static_cast<int>(openingPenalties.size())) {
                 scores[i] -= openingPenalties[i];
             }
@@ -711,7 +745,7 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
     std::vector<std::thread> workers;
     workers.reserve(workerCount);
     for (int worker = 0; worker < workerCount; ++worker) {
-        workers.emplace_back([&, rootSide]() {
+        workers.emplace_back([&, rootSide, pruneWidth]() {
             while (!shouldStop()) {
                 const int index = nextIndex.fetch_add(1);
                 if (index >= orderedMoves.size()) {
@@ -719,7 +753,11 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
                 }
                 Board next = board;
                 applyMove(next, orderedMoves[index]);
-                scores[index] = search(next, depth - 1, -MateScore, MateScore, rootSide);
+                int searchDepth = depth - 1;
+                if (pruneWidth > 0 && depth >= 3 && index >= pruneWidth) {
+                    searchDepth = std::max(0, depth - 3);
+                }
+                scores[index] = search(next, searchDepth, -MateScore, MateScore, rootSide);
                 if (index < static_cast<int>(openingPenalties.size())) {
                     scores[index] -= openingPenalties[index];
                 }

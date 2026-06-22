@@ -51,29 +51,6 @@ else()
     target_compile_options(kishi-to-classic PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-# --- GPU評価エンジン (NN 1手評価) ---
-add_executable(kishi-to-gpu
-    src/evaluation.cpp
-    src/gpu_bridge.cpp
-    src/gpu_eval_engine.cpp
-    src/gpu_usi_protocol.cpp
-    src/gpu_main.cpp
-)
-target_link_libraries(kishi-to-gpu PRIVATE shogi_core)
-target_compile_features(kishi-to-gpu PRIVATE cxx_std_17)
-if(MSVC)
-    target_compile_options(kishi-to-gpu PRIVATE /W4 /permissive- /utf-8)
-else()
-    target_compile_options(kishi-to-gpu PRIVATE -Wall -Wextra -Wpedantic)
-endif()
-
-add_custom_command(TARGET kishi-to-gpu POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:kishi-to-gpu>/tools"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/tools/gpu_eval.py"
-        "$<TARGET_FILE_DIR:kishi-to-gpu>/tools/gpu_eval.py"
-)
-
 # --- MCTSエンジン (Transformer + MCTS) ---
 add_executable(kishi-to
     src/mcts.cpp

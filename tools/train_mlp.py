@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Train the GPU engine's MLP evaluation from Floodgate kifu.
+"""Train the Classic engine's MLP evaluation from Floodgate kifu.
 
 Reuses train_classic.py for CSA parsing, then calls kishi-to-classic
 --extract-features to produce feature vectors, and finally trains the
-MLP model via gpu_eval.py.
+MLP model via mlp_eval.py.
 
 Usage:
-  python tools/train_gpu.py --kifu kifu/floodgate --engine build/kishi-to-classic
-  python tools/train_gpu.py --kifu kifu/floodgate --engine build/kishi-to-classic --epochs 5 --lr 1e-3
+  python tools/train_mlp.py --kifu kifu/floodgate --engine build/kishi-to-classic
+  python tools/train_mlp.py --kifu kifu/floodgate --engine build/kishi-to-classic --epochs 5 --lr 1e-3
 """
 
 from __future__ import annotations
@@ -38,12 +38,12 @@ def _parse_worker(args_tuple):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train GPU engine MLP from Floodgate kifu")
+        description="Train Classic engine MLP from Floodgate kifu")
     parser.add_argument("--kifu", required=True, help="Kifu directory")
     parser.add_argument("--engine", required=True,
                         help="kishi-to-classic executable (for feature extraction)")
-    parser.add_argument("--model", default="gpu_model.pt",
-                        help="Output model path (default: gpu_model.pt)")
+    parser.add_argument("--model", default="mlp_model.pt",
+                        help="Output model path (default: mlp_model.pt)")
     parser.add_argument("--min-rate", type=int, default=1500,
                         help="Minimum player rating (default: 1500)")
     parser.add_argument("--max-games", type=int, default=0,
@@ -103,8 +103,8 @@ def main():
     model_dir = Path(args.model).parent
     if str(model_dir) and model_dir != Path(""):
         model_dir.mkdir(parents=True, exist_ok=True)
-    positions_file = model_dir / "gpu_positions.tsv"
-    features_file = model_dir / "gpu_training.tsv"
+    positions_file = model_dir / "mlp_positions.tsv"
+    features_file = model_dir / "mlp_training.tsv"
 
     with open(positions_file, "w", encoding="utf-8") as f:
         for s in all_samples:
@@ -131,7 +131,7 @@ def main():
     print("Step 3: Training MLP...", file=sys.stderr)
     tools_dir = Path(__file__).parent
     train_cmd = [
-        sys.executable, str(tools_dir / "gpu_eval.py"), "train",
+        sys.executable, str(tools_dir / "mlp_eval.py"), "train",
         "--data", str(features_file.resolve()),
         "--model", str(Path(args.model).resolve()),
         "--device", args.device,
@@ -145,7 +145,19 @@ def main():
         print("Training failed.", file=sys.stderr)
         return 1
 
-    print(f"Done. Model saved to {args.model}", file=sys.stderr)
+    # Step 4: Export to text weights for C++ engine
+    print("Step 4: Exporting mlp.weights...", file=sys.stderr)
+    mlp_weights = str(Path(args.model).with_suffix(".weights"))
+    export_cmd = [
+        sys.executable, str(tools_dir / "export_mlp.py"),
+        "--model", str(Path(args.model).resolve()),
+        "--output", mlp_weights,
+    ]
+    result = subprocess.run(export_cmd, stderr=sys.stderr)
+    if result.returncode != 0:
+        print("Warning: export_mlp.py failed. Run manually.", file=sys.stderr)
+
+    print(f"Done. Model: {args.model}, Weights: {mlp_weights}", file=sys.stderr)
     return 0
 
 

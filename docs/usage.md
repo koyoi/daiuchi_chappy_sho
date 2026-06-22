@@ -16,6 +16,12 @@ build\Release\kishi-to.exe           (MCTS + Transformer)
 
 エンジン起動時に作業ディレクトリを exe のある場所へ移すため、重みファイルやスクリプトは exe 基準の相対パスで解決されます。
 
+### Classic エンジンの準備
+
+`kishi-to-classic.exe` はそのままで動作します（線形評価）。
+
+MLP 評価を使う場合は、exe と同じディレクトリに `mlp.weights` を配置し、USI オプション `MlpWeightsFile` にパスを設定します。
+
 ### MCTS エンジンの準備
 
 `kishi-to.exe` を使うには、exe と同じディレクトリに以下を配置します:
@@ -71,17 +77,15 @@ setoption name Threads value 1..256
 setoption name HeavyEvaluation value true|false
 setoption name OpeningSafety value true|false
 setoption name WeightsFile value random-shogi.weights
-setoption name TrainingDataFile value gpu_training.tsv
-setoption name UseGpu value true|false
-setoption name GpuTrainOnGameEnd value true|false
-setoption name GpuPython value python
-setoption name GpuScript value tools/gpu_eval.py
-setoption name GpuModel value gpu_model.pt
-setoption name GpuDevice value auto|cuda|cpu
+setoption name TrainingDataFile value mlp_training.tsv
+setoption name MlpWeightsFile value mlp.weights
+setoption name RootPruneWidth value 0..256
 ```
 
 **主要オプションの説明:**
 
+- `MlpWeightsFile` — MLP 重みファイルのパス。設定するとリーフ評価が線形から MLP に切り替わる。空欄なら線形評価。
+- `RootPruneWidth` — Root で上位何手をフル深さで読むか（デフォルト 15）。0 で無効化（全手フル深さ）。Late Move Reduction により有望手に探索時間を集中させる。
 - `SearchDepth` — 読みの上限。`0` なら持ち時間内で可能な限り反復深化。
 - `MaxMoveTimeMs` — GUI から持ち時間指定がない場合の 1 手あたり上限 (ms)。
 - `Threads` — CPU 探索スレッド数。デフォルトは物理コア数 - 2。
@@ -125,35 +129,6 @@ Classic エンジンは CSA モードにも対応しています。
 - `START:...`
 - `+7776FU` / `-3334FU` 形式の指し手
 - `go`
-
----
-
-## GPU 推論・学習 (Classic)
-
-Classic エンジンで GPU を使う場合:
-
-```text
-setoption name UseGpu value true
-setoption name GpuPython value python
-setoption name GpuScript value tools/gpu_eval.py
-setoption name GpuModel value gpu_model.pt
-setoption name GpuDevice value auto
-```
-
-Python・PyTorch・CUDA・モデルファイルのいずれかが使えない場合は C++ 側の評価関数へフォールバックします。
-
-対局終了時に GPU モデルも更新する場合:
-
-```text
-setoption name GpuTrainOnGameEnd value true
-setoption name TrainingDataFile value gpu_training.tsv
-```
-
-手動で学習する場合:
-
-```sh
-python tools/gpu_eval.py train --data gpu_training.tsv --model gpu_model.pt --device auto
-```
 
 ---
 

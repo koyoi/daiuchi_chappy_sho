@@ -1,6 +1,6 @@
 # 学習パイプライン
 
-3 つのエンジンすべてが Floodgate CSA 棋譜から学習できます。
+2 つのエンジンが Floodgate CSA 棋譜から学習できます。
 入力は共通、各エンジン専用のスクリプトがパース→学習→モデル保存を行います。
 
 ---
@@ -10,17 +10,17 @@
 ```text
 Floodgate CSA 棋譜 (kifu/floodgate/*.csa)
         │
-        ├── train_classic.py ──→ random-shogi.weights  (kishi-to-classic 用)
+        ├── train_classic.py ──→ random-shogi.weights  (Classic 線形評価)
         │
-        ├── train_gpu.py    ──→ gpu_model.pt           (kishi-to-gpu 用)
+        ├── train_mlp.py    ──→ mlp_model.pt + mlp.weights  (Classic MLP 評価)
         │
-        └── train.py        ──→ nn_model.pt            (kishi-to 用)
+        └── train.py        ──→ nn_model.pt            (kishi-to MCTS)
 ```
 
 | エンジン | 学習スクリプト | モデルファイル | 評価方式 |
 |---------|-------------|-------------|---------|
-| Classic (αβ探索) | `train_classic.py` | `random-shogi.weights` | 74次元線形 |
-| GPU (NN 1手評価) | `train_gpu.py` | `gpu_model.pt` | MLP (74→64→32→1) |
+| Classic (αβ探索 線形) | `train_classic.py` | `random-shogi.weights` | 74次元線形 |
+| Classic (αβ探索 MLP) | `train_mlp.py` | `mlp.weights` | MLP (74→64→32→1) |
 | MCTS (Transformer) | `train.py` | `nn_model.pt` | Transformer (方策+価値) |
 
 ---
@@ -41,7 +41,7 @@ kifu/
 
 ---
 
-## 1. Classic エンジン (`kishi-to-classic`)
+## 1. Classic エンジン — 線形評価 (`train_classic.py`)
 
 74次元の手作り特徴量に対する線形重みを Bonanza 法で学習します。
 
@@ -84,14 +84,15 @@ cp random-shogi.weights build/random-shogi.weights
 
 ---
 
-## 2. GPU エンジン (`kishi-to-gpu`)
+## 2. Classic エンジン — MLP 評価 (`train_mlp.py`)
 
-Classic と同じ 74 次元特徴量を入力とする MLP を学習します。
+Classic と同じ 74 次元特徴量を入力とする MLP を学習し、テキスト形式の重みファイルにエクスポートします。
+αβ探索のリーフノード評価を MLP に置き換えることで、非線形パターン（駒の連携・囲い強度など）を捉えた評価が可能になります。
 
 ### クイックスタート
 
 ```sh
-python tools/train_gpu.py \
+python tools/train_mlp.py \
   --kifu kifu/floodgate \
   --engine build/kishi-to-classic
 ```
@@ -102,8 +103,9 @@ python tools/train_gpu.py \
 2. `kishi-to-classic --extract-features` で 74 次元特徴量を抽出
    - 正解手の局面 → ラベル +1.0
    - ランダムな不正解手の局面 → ラベル -1.0
-3. `gpu_eval.py train` で MLP (74→64→32→1) を BCEWithLogitsLoss で学習
-4. `gpu_model.pt` に保存
+3. `mlp_eval.py train` で MLP (74→64→32→1) を BCEWithLogitsLoss で学習
+4. `mlp_model.pt` に保存
+5. `export_mlp.py` で `mlp.weights`（テキスト形式）にエクスポート
 
 ### オプション
 
@@ -111,7 +113,7 @@ python tools/train_gpu.py \
 |-----------|----------|------|
 | `--kifu` | (必須) | CSA 棋譜のルートディレクトリ |
 | `--engine` | (必須) | `kishi-to-classic` 実行ファイル |
-| `--model` | `gpu_model.pt` | モデル保存先 |
+| `--model` | `mlp_model.pt` | モデル保存先 |
 | `--min-rate` | 1500 | 最低レーティング |
 | `--max-games` | 0 | 最大棋譜数 (0=全部) |
 | `--skip-opening` | 10 | 序盤 N 手をスキップ |
@@ -125,7 +127,15 @@ python tools/train_gpu.py \
 ### モデルの配備
 
 ```sh
-cp gpu_model.pt build/gpu_model.pt
+cp mlp.weights build/mlp.weights
+```
+
+USI で `setoption name MlpWeightsFile value mlp.weights` を設定すると MLP 評価に切り替わります。
+
+### 手動エクスポート
+
+```sh
+python tools/export_mlp.py --model mlp_model.pt --output mlp.weights
 ```
 
 ---
@@ -207,6 +217,7 @@ cp nn_model.pt build/nn_model.pt
 | ファイル | 役割 |
 |---------|------|
 | `tools/csa_parser.py` | Floodgate CSA 棋譜パーサー (全スクリプト共通) |
+| `tools/export_mlp.py` | PyTorch MLP → テキスト重みファイル変換 |
 | `tools/self_play.py` | USI 自己対戦 (MCTS 用) |
 | `tools/train_loop.py` | バージョン管理付き学習ループ (MCTS 用) |
 

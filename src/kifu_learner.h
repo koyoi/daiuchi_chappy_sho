@@ -17,7 +17,7 @@ int learnFromKifu(const KifuLearnConfig& config);
 
 struct ExtractFeaturesConfig {
     std::string trainingFile;
-    std::string outputFile = "gpu_training.tsv";
+    std::string outputFile = "mlp_training.tsv";
     int negatives = 1;
 };
 
