@@ -24,6 +24,14 @@ constexpr std::array<double, FeatureCount> DefaultWeights = {
     30.0, 45.0, 45.0, 4.0,
     18.0, 12.0,
     10.0, 30.0,
+    8.0, 5.0, 10.0, 12.0, 12.0, 8.0, 10.0,
+    35.0, 25.0, 15.0, 20.0,
+    -12.0, -8.0, 15.0,
+    20.0, 12.0, 25.0,
+    5.0, 8.0, 12.0,
+    6.0, 5.0, 8.0, 5.0,
+    25.0, 35.0,
+    5.0, 8.0, -5.0, -8.0,
 };
 
 constexpr int PstRank[PieceTypeCount][9] = {
@@ -135,6 +143,46 @@ bool goldLike(PieceType type) {
 
 bool isAdvancedPawn(Color color, int rank) {
     return color == Black ? rank <= 5 : rank >= 5;
+}
+
+constexpr int PstFileTable[7][9] = {
+    {0, 0, 1, 1, 2, 1, 1, 0, 0},
+    {1, 0, 0, 0, 0, 0, 0, 0, 1},
+    {-1, 0, 1, 2, 2, 2, 1, 0, -1},
+    {0, 1, 2, 2, 1, 1, 0, 0, 0},
+    {1, 2, 2, 1, 0, 0, 0, 0, 0},
+    {0, 0, 1, 1, 2, 1, 1, 0, 0},
+    {0, 2, 1, 0, 1, 1, 1, 2, 0},
+};
+
+int fileFeatureIndex(PieceType type) {
+    switch (type) {
+    case Pawn: return 44;
+    case Lance: return 45;
+    case Knight: return 46;
+    case Silver: return 47;
+    case Gold: case ProPawn: case ProLance: case ProKnight: case ProSilver: return 48;
+    case Bishop: case Horse: return 49;
+    case Rook: case Dragon: return 50;
+    default: return -1;
+    }
+}
+
+int countSlide(const Board& board, int from, int df, int dr, Color owner) {
+    int ci = owner == Black ? 0 : 1;
+    Bitboard occ = board.occupied[0] | board.occupied[1];
+    int count = 0;
+    int f = fileOf(from) + df;
+    int r = rankOf(from) + dr;
+    while (inside(f, r)) {
+        int sq = idx(f, r);
+        if (board.occupied[ci].test(sq)) break;
+        ++count;
+        if (occ.test(sq)) break;
+        f += df;
+        r += dr;
+    }
+    return count;
 }
 
 int kingDefenders(const Board& board, const AttackMap& attacks, Color color) {
@@ -254,9 +302,15 @@ FeatureVector Evaluator::extractFeatures(const Board& board, Color perspective) 
         }
 
         const int rank = rankOf(square);
+        const int file = fileOf(square);
         const int relRank = owner == Black ? rank : 10 - rank;
+        const int relFile = owner == Black ? file : 10 - file;
         if (type < PieceTypeCount) {
             features[42] += sign * PstRank[type][relRank - 1];
+        }
+        const int ffi = fileFeatureIndex(type);
+        if (ffi >= 0) {
+            features[ffi] += sign * PstFileTable[ffi - 44][relFile - 1];
         }
         if (inPromotionZone(owner, rank)) {
             features[17] += sign;
@@ -382,6 +436,249 @@ FeatureVector Evaluator::extractFeatures(const Board& board, Color perspective) 
     };
     features[43] = pawnShelter(perspective) - pawnShelter(enemy);
 
+    // King surround (51-54)
+    {
+        struct KingSurround { int gold = 0; int silver = 0; int friendly = 0; int enemy = 0; };
+        auto countKS = [&](Color kingColor) -> KingSurround {
+            KingSurround ks;
+            int kingSq = kingColor == Black ? blackKing : whiteKing;
+            if (kingSq < 0) return ks;
+            for (int df = -1; df <= 1; ++df) {
+                for (int dr = -1; dr <= 1; ++dr) {
+                    if (df == 0 && dr == 0) continue;
+                    int f = fileOf(kingSq) + df;
+                    int r = rankOf(kingSq) + dr;
+                    if (!inside(f, r)) continue;
+                    int p = board.squares[idx(f, r)];
+                    if (p == 0) continue;
+                    Color pc = static_cast<Color>(colorOf(p));
+                    PieceType pt = typeOf(p);
+                    if (pc == kingColor) {
+                        ++ks.friendly;
+                        if (pt == Gold || pt == ProPawn || pt == ProLance
+                            || pt == ProKnight || pt == ProSilver)
+                            ++ks.gold;
+                        if (pt == Silver) ++ks.silver;
+                    } else {
+                        ++ks.enemy;
+                    }
+                }
+            }
+            return ks;
+        };
+        auto ownKS = countKS(perspective);
+        auto enemyKS = countKS(enemy);
+        features[51] = ownKS.gold - enemyKS.gold;
+        features[52] = ownKS.silver - enemyKS.silver;
+        features[53] = ownKS.friendly - enemyKS.friendly;
+        features[54] = enemyKS.enemy - ownKS.enemy;
+    }
+
+    // Pawn structure (55-57)
+    {
+        auto pawnStruct = [&](Color color) -> std::array<int, 3> {
+            int ci = color == Black ? 0 : 1;
+            int eci = 1 - ci;
+            Bitboard pawns = board.pieceBB[Pawn] & board.occupied[ci];
+            Bitboard enemyPawns = board.pieceBB[Pawn] & board.occupied[eci];
+            int doubled = 0, isolated = 0, candidates = 0;
+            for (int f = 1; f <= 9; ++f) {
+                int cnt = (pawns & FileMask[f]).popcount();
+                if (cnt > 1) doubled += cnt - 1;
+                if (cnt > 0) {
+                    bool adj = (f > 1 && !(pawns & FileMask[f - 1]).empty())
+                            || (f < 9 && !(pawns & FileMask[f + 1]).empty());
+                    if (!adj) isolated += cnt;
+                    if ((enemyPawns & FileMask[f]).empty()) candidates += cnt;
+                }
+            }
+            return {doubled, isolated, candidates};
+        };
+        auto own = pawnStruct(perspective);
+        auto enem = pawnStruct(enemy);
+        features[55] = own[0] - enem[0];
+        features[56] = own[1] - enem[1];
+        features[57] = own[2] - enem[2];
+    }
+
+    // Rook activity (58-60)
+    {
+        auto rookAct = [&](Color color) -> std::array<int, 3> {
+            int ci = color == Black ? 0 : 1;
+            int oppKingSq = color == perspective ? enemyKing : ownKing;
+            int oppKingFile = oppKingSq >= 0 ? fileOf(oppKingSq) : -1;
+            Bitboard rooks = (board.pieceBB[Rook] | board.pieceBB[Dragon]) & board.occupied[ci];
+            int openF = 0, semiF = 0, kingAlign = 0;
+            while (!rooks.empty()) {
+                int sq = rooks.lsb();
+                rooks.clear(sq);
+                int f = fileOf(sq);
+                bool ownPawn = !(board.pieceBB[Pawn] & board.occupied[ci] & FileMask[f]).empty();
+                bool oppPawn = !(board.pieceBB[Pawn] & board.occupied[1 - ci] & FileMask[f]).empty();
+                if (!ownPawn && !oppPawn) ++openF;
+                else if (!ownPawn) ++semiF;
+                if (f == oppKingFile) ++kingAlign;
+            }
+            return {openF, semiF, kingAlign};
+        };
+        auto ownRA = rookAct(perspective);
+        auto enemyRA = rookAct(enemy);
+        features[58] = ownRA[0] - enemyRA[0];
+        features[59] = ownRA[1] - enemyRA[1];
+        features[60] = ownRA[2] - enemyRA[2];
+    }
+
+    // Zone control (61-63)
+    {
+        int controlOwn = 0, controlCtr = 0, controlEne = 0;
+        for (int sq = 0; sq < BoardSize; ++sq) {
+            int relR = perspective == Black ? rankOf(sq) : 10 - rankOf(sq);
+            bool ownCtrl = attackersFromMap(attacks, sq, perspective) > 0;
+            bool eneCtrl = attackersFromMap(attacks, sq, enemy) > 0;
+            int diff = (ownCtrl ? 1 : 0) - (eneCtrl ? 1 : 0);
+            if (relR <= 3) controlEne += diff;
+            else if (relR <= 6) controlCtr += diff;
+            else controlOwn += diff;
+        }
+        features[61] = controlOwn;
+        features[62] = controlCtr;
+        features[63] = controlEne;
+    }
+
+    // Piece mobility (64-67)
+    {
+        auto mob = [&](Color color) -> std::array<int, 4> {
+            int ci = color == Black ? 0 : 1;
+            int rookMob = 0, bishopMob = 0, silverMob = 0, lanceMob = 0;
+
+            Bitboard rooks = (board.pieceBB[Rook] | board.pieceBB[Dragon]) & board.occupied[ci];
+            while (!rooks.empty()) {
+                int sq = rooks.lsb();
+                rooks.clear(sq);
+                rookMob += countSlide(board, sq, 0, -1, color);
+                rookMob += countSlide(board, sq, 0, 1, color);
+                rookMob += countSlide(board, sq, -1, 0, color);
+                rookMob += countSlide(board, sq, 1, 0, color);
+                if (typeOf(board.squares[sq]) == Dragon) {
+                    for (int df2 = -1; df2 <= 1; df2 += 2)
+                        for (int dr2 = -1; dr2 <= 1; dr2 += 2) {
+                            int f = fileOf(sq) + df2, r = rankOf(sq) + dr2;
+                            if (inside(f, r) && !board.occupied[ci].test(idx(f, r)))
+                                ++rookMob;
+                        }
+                }
+            }
+
+            Bitboard bishops = (board.pieceBB[Bishop] | board.pieceBB[Horse]) & board.occupied[ci];
+            while (!bishops.empty()) {
+                int sq = bishops.lsb();
+                bishops.clear(sq);
+                for (int df2 = -1; df2 <= 1; df2 += 2)
+                    for (int dr2 = -1; dr2 <= 1; dr2 += 2)
+                        bishopMob += countSlide(board, sq, df2, dr2, color);
+                if (typeOf(board.squares[sq]) == Horse) {
+                    int ortho[][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
+                    for (auto& d : ortho) {
+                        int f = fileOf(sq) + d[0], r = rankOf(sq) + d[1];
+                        if (inside(f, r) && !board.occupied[ci].test(idx(f, r)))
+                            ++bishopMob;
+                    }
+                }
+            }
+
+            int fwd = color == Black ? -1 : 1;
+            Bitboard silvers = board.pieceBB[Silver] & board.occupied[ci];
+            while (!silvers.empty()) {
+                int sq = silvers.lsb();
+                silvers.clear(sq);
+                for (int df2 = -1; df2 <= 1; ++df2) {
+                    int f = fileOf(sq) + df2, r = rankOf(sq) + fwd;
+                    if (inside(f, r) && !board.occupied[ci].test(idx(f, r)))
+                        ++silverMob;
+                }
+                for (int df2 = -1; df2 <= 1; df2 += 2) {
+                    int f = fileOf(sq) + df2, r = rankOf(sq) - fwd;
+                    if (inside(f, r) && !board.occupied[ci].test(idx(f, r)))
+                        ++silverMob;
+                }
+            }
+
+            int lDir = color == Black ? -1 : 1;
+            Bitboard lances = board.pieceBB[Lance] & board.occupied[ci];
+            while (!lances.empty()) {
+                int sq = lances.lsb();
+                lances.clear(sq);
+                lanceMob += countSlide(board, sq, 0, lDir, color);
+            }
+
+            return {rookMob, bishopMob, silverMob, lanceMob};
+        };
+        auto ownMob = mob(perspective);
+        auto enemyMob = mob(enemy);
+        features[64] = (ownMob[0] - enemyMob[0]) / 10.0;
+        features[65] = (ownMob[1] - enemyMob[1]) / 10.0;
+        features[66] = ownMob[2] - enemyMob[2];
+        features[67] = ownMob[3] - enemyMob[3];
+    }
+
+    // Threats (68-69)
+    {
+        auto pawnThr = [&](Color color) -> int {
+            int ci = color == Black ? 0 : 1;
+            Bitboard pawns = board.pieceBB[Pawn] & board.occupied[ci];
+            int dir = color == Black ? -9 : 9;
+            int threats = 0;
+            while (!pawns.empty()) {
+                int sq = pawns.lsb();
+                pawns.clear(sq);
+                int tgt = sq + dir;
+                if (tgt >= 0 && tgt < BoardSize) {
+                    int p = board.squares[tgt];
+                    if (p != 0 && static_cast<Color>(colorOf(p)) != color
+                        && typeOf(p) != Pawn)
+                        ++threats;
+                }
+            }
+            return threats;
+        };
+        features[68] = pawnThr(perspective) - pawnThr(enemy);
+
+        auto minorMajor = [&](Color color) -> int {
+            int ci = color == Black ? 0 : 1;
+            int eci = 1 - ci;
+            Bitboard enemyMaj = (board.pieceBB[Rook] | board.pieceBB[Bishop]
+                | board.pieceBB[Horse] | board.pieceBB[Dragon]) & board.occupied[eci];
+            Bitboard ownMin = (board.pieceBB[Pawn] | board.pieceBB[Lance]
+                | board.pieceBB[Knight] | board.pieceBB[Silver]) & board.occupied[ci];
+            int threats = 0;
+            while (!enemyMaj.empty()) {
+                int sq = enemyMaj.lsb();
+                enemyMaj.clear(sq);
+                Bitboard minors = ownMin;
+                while (!minors.empty()) {
+                    int msq = minors.lsb();
+                    minors.clear(msq);
+                    if (attacksSquare(board, msq, sq)) {
+                        ++threats;
+                        break;
+                    }
+                }
+            }
+            return threats;
+        };
+        features[69] = minorMajor(perspective) - minorMajor(enemy);
+    }
+
+    // King position (70-73)
+    if (ownKing >= 0) {
+        features[70] = std::abs(5 - fileOf(ownKing));
+        features[71] = perspective == Black ? rankOf(ownKing) : 10 - rankOf(ownKing);
+    }
+    if (enemyKing >= 0) {
+        features[72] = std::abs(5 - fileOf(enemyKing));
+        features[73] = perspective == Black ? rankOf(enemyKing) : 10 - rankOf(enemyKing);
+    }
+
     return features;
 }
 
@@ -430,11 +727,64 @@ bool Evaluator::save(const std::string& path) const {
     return true;
 }
 
+bool Evaluator::computeGradient(const Board& board, const Move& correctMove, GradientResult& out, double temperature) const {
+    auto legal = generateLegalMoves(board, true);
+    if (legal.size() <= 1) return false;
+
+    int correctIdx = -1;
+    for (std::size_t i = 0; i < legal.size(); ++i) {
+        if (sameMove(legal[i], correctMove)) {
+            correctIdx = static_cast<int>(i);
+            break;
+        }
+    }
+    if (correctIdx < 0) return false;
+
+    std::vector<FeatureVector> features(legal.size());
+    std::vector<double> scores(legal.size());
+    for (std::size_t i = 0; i < legal.size(); ++i) {
+        Board after = board;
+        applyMove(after, legal[i]);
+        features[i] = extractFeatures(after, board.side);
+        scores[i] = std::inner_product(features[i].begin(), features[i].end(),
+                                        weights_.begin(), 0.0);
+    }
+
+    int bestIdx = static_cast<int>(std::max_element(scores.begin(), scores.end()) - scores.begin());
+    out.correct = (bestIdx == correctIdx);
+
+    double maxScore = scores[bestIdx];
+    double sumExp = 0.0;
+    for (auto& s : scores) {
+        s = std::exp((s - maxScore) / temperature);
+        sumExp += s;
+    }
+
+    double correctProb = scores[correctIdx] / sumExp;
+    out.loss = -std::log(std::max(correctProb, 1e-10));
+
+    FeatureVector expected{};
+    for (std::size_t i = 0; i < legal.size(); ++i) {
+        double p = scores[i] / sumExp;
+        for (int j = 0; j < FeatureCount; ++j) {
+            expected[j] += p * features[i][j];
+        }
+    }
+
+    out.delta = features[correctIdx] - expected;
+    return true;
+}
+
+bool Evaluator::learnFromMove(const Board& board, const Move& correctMove, double lr) {
+    GradientResult result;
+    if (!computeGradient(board, correctMove, result)) return false;
+    applyDelta(result.delta, lr);
+    return true;
+}
+
 void Evaluator::applyDelta(const FeatureVector& delta, double scale) {
-    constexpr double L2Lambda = 0.001;
     for (int i = 0; i < FeatureCount; ++i) {
-        weights_[i] *= (1.0 - L2Lambda);
-        double maxW = std::max(std::abs(DefaultWeights[i]) * 5.0, 5.0);
+        double maxW = std::max(std::abs(DefaultWeights[i]) * 10.0, 50.0);
         weights_[i] = std::clamp(weights_[i] + delta[i] * scale, -maxW, maxW);
     }
 }

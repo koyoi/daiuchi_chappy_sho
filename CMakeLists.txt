@@ -38,6 +38,7 @@ add_executable(kishi-to-classic
     src/evaluation.cpp
     src/learning.cpp
     src/gpu_bridge.cpp
+    src/kifu_learner.cpp
     src/usi_protocol.cpp
     src/csa_protocol.cpp
     src/main.cpp

@@ -7,7 +7,7 @@
 
 namespace shogi {
 
-constexpr int FeatureCount = 44;
+constexpr int FeatureCount = 74;
 using FeatureVector = std::array<double, FeatureCount>;
 
 class Evaluator {
@@ -21,6 +21,13 @@ public:
     bool load(const std::string& path);
     bool save(const std::string& path) const;
     void applyDelta(const FeatureVector& delta, double scale);
+    bool learnFromMove(const Board& board, const Move& correctMove, double lr);
+    struct GradientResult {
+        FeatureVector delta{};
+        double loss = 0.0;
+        bool correct = false;
+    };
+    bool computeGradient(const Board& board, const Move& correctMove, GradientResult& out, double temperature = 100.0) const;
 
 private:
     std::array<double, FeatureCount> weights_{};
