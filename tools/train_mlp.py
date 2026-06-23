@@ -20,7 +20,7 @@ import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from train_classic import parse_game_for_classic
+from train_classic import load_index, parse_game_for_classic
 
 try:
     from tqdm import tqdm
@@ -65,8 +65,14 @@ def main():
     args = parser.parse_args()
 
     kifu_dir = Path(args.kifu)
-    csa_files = sorted(kifu_dir.rglob("*.csa"))
-    print(f"Found {len(csa_files)} CSA files", file=sys.stderr)
+
+    indexed = load_index(kifu_dir, args.min_rate)
+    if indexed is not None:
+        csa_files = indexed
+        print(f"Using index: {len(csa_files)} pre-filtered files", file=sys.stderr)
+    else:
+        csa_files = sorted(str(f) for f in kifu_dir.rglob("*.csa"))
+        print(f"No index found, scanning {len(csa_files)} CSA files", file=sys.stderr)
 
     if args.max_games > 0:
         csa_files = csa_files[:args.max_games]

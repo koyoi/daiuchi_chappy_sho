@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import random
 import re
@@ -39,8 +40,8 @@ def parse_game_for_classic(filepath: Path, min_rate: int = 0,
                            sample_rate: float = 1.0) -> Optional[List[dict]]:
     """Parse a CSA kifu file for classic engine training.
 
-    Returns list of {sfen, usi_move} for positions where the higher-rated
-    winner moved, skipping the first skip_opening moves.
+    Returns list of {sfen, usi_move} for positions where the winner
+    moved, skipping the first skip_opening moves.
     """
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
@@ -92,15 +93,8 @@ def parse_game_for_classic(filepath: Path, min_rate: int = 0,
     if min_rate > 0 and (black_rate < min_rate or white_rate < min_rate):
         return None
 
-    # Determine the higher-rated player; require that they also won
-    if black_rate >= white_rate:
-        teacher_side = 1  # Black
-        if not black_win:
-            return None
-    else:
-        teacher_side = -1  # White
-        if black_win:
-            return None
+    # Learn from the winner's moves
+    teacher_side = 1 if black_win else -1
 
     # Parse initial position
     board_setup_lines = [l for l in lines if re.match(r"^P[1-9+\-]", l)]
@@ -191,6 +185,35 @@ def _parse_worker(args_tuple):
                                   sample_rate=sample_rate)
 
 
+def load_index(kifu_dir: Path, min_rate: int) -> Optional[List[str]]:
+    """Load index.tsv and return pre-filtered file list, or None if no index."""
+    index_path = kifu_dir / "index.tsv"
+    if not index_path.exists():
+        return None
+    filtered = []
+    total = 0
+    with open(index_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            total += 1
+            try:
+                br = float(row.get("black_rate", 0))
+                wr = float(row.get("white_rate", 0))
+            except (ValueError, TypeError):
+                continue
+            winner = row.get("winner", "")
+            if winner not in ("black", "white"):
+                continue
+            if min_rate > 0 and (br < min_rate or wr < min_rate):
+                continue
+            filepath = row.get("file", "")
+            if filepath:
+                filtered.append(filepath)
+    print(f"Index: {total} total -> {len(filtered)} games (both >= {min_rate}, decisive)",
+          file=sys.stderr)
+    return filtered
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Train classic engine evaluation from Floodgate kifu (Bonanza method)")
@@ -215,8 +238,14 @@ def main():
     args = parser.parse_args()
 
     kifu_dir = Path(args.kifu)
-    csa_files = sorted(kifu_dir.rglob("*.csa"))
-    print(f"Found {len(csa_files)} CSA files", file=sys.stderr)
+
+    indexed = load_index(kifu_dir, args.min_rate)
+    if indexed is not None:
+        csa_files = indexed
+        print(f"Using index: {len(csa_files)} pre-filtered files", file=sys.stderr)
+    else:
+        csa_files = sorted(str(f) for f in kifu_dir.rglob("*.csa"))
+        print(f"No index found, scanning {len(csa_files)} CSA files", file=sys.stderr)
 
     if args.max_games > 0:
         csa_files = csa_files[:args.max_games]

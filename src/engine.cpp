@@ -313,6 +313,8 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
         }
     }
 
+    analyzeSubGoals(board, rootSide);
+
     orderMoves(board, legal, rootSide, 0);
 
     std::vector<int> openingPenalties(legal.size(), 0);
@@ -564,6 +566,27 @@ void LearningEngine::storeCounterMove(Color side, const Move& prevMove, const Mo
     const int from = prevMove.isDrop() ? prevMove.to : prevMove.from;
     if (from < 0 || from >= BoardSize || prevMove.to < 0 || prevMove.to >= BoardSize) return;
     counterMoves_[colorIdx][from][prevMove.to] = counterMove;
+}
+
+void LearningEngine::analyzeSubGoals(const Board& board, Color rootSide) const {
+    std::fill(targetPieces_.begin(), targetPieces_.end(), false);
+    const int baseScore = evaluator_.evaluate(board, rootSide);
+    const int ci = rootSide == Black ? 0 : 1;
+
+    for (PieceType pt : {Pawn, Lance, Knight, Silver, Gold, Bishop, Rook}) {
+        if (hand(board, rootSide)[pt] > 0) continue;
+
+        Board hyp = board;
+        const int oldCount = hand(hyp, rootSide)[pt];
+        hyp.hash ^= zobrist::handKey(ci, pt, oldCount);
+        hand(hyp, rootSide)[pt]++;
+        hyp.hash ^= zobrist::handKey(ci, pt, oldCount + 1);
+
+        const int hypScore = search(hyp, SubGoalDepth, 0, -MateScore, MateScore, rootSide, false, Move{});
+        if (hypScore - baseScore >= SubGoalThreshold) {
+            targetPieces_[pt] = true;
+        }
+    }
 }
 
 void LearningEngine::storeKiller(int ply, const Move& move) const {
@@ -1156,6 +1179,10 @@ int LearningEngine::moveOrderScore(const Board& board, const Move& move, Color r
         const PieceType captured = typeOf(board.squares[move.to]);
         const PieceType moving = typeOf(board.squares[move.from]);
         score += 10000 + pieceValue(captured) * 10 - pieceValue(moving);
+        const PieceType capturedBase = unpromote(captured);
+        if (targetPieces_[capturedBase]) {
+            score += SubGoalCaptureBonus;
+        }
     }
 
     if (givesCheck(board, move)) {

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Tuple
 
 
-FEATURE_COUNT = 98
+FEATURE_COUNT = 100
 
 
 def import_torch():
@@ -81,7 +81,14 @@ def load_model(model_path: Path, torch, nn, device, require_exists: bool):
             raise FileNotFoundError(model_path)
         return model
     state = torch.load(model_path, map_location=device)
-    model.load_state_dict(state)
+    try:
+        model.load_state_dict(state)
+    except RuntimeError:
+        if require_exists:
+            raise
+        import sys
+        print(f"Warning: checkpoint shape mismatch, starting fresh", file=sys.stderr)
+        return model
     return model
 
 
