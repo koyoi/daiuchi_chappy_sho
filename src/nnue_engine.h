@@ -35,6 +35,10 @@ public:
     SearchInfo lastSearchInfo() const;
     MateResult searchMate(const Board& board, int timeLimitMs = 500);
 
+    void setParam(const std::string& name, int value);
+    int getParam(const std::string& name) const;
+    void setRootPruneWidth(int w) { rootPruneWidth_ = w; }
+
 private:
     int search(Board& board, int depth, int ply, int alpha, int beta, Color rootSide, bool allowNullMove = true, const Move& prevMove = Move{}) const;
     int quiescence(Board& board, int depth, int ply, int alpha, int beta, Color rootSide) const;
@@ -67,14 +71,17 @@ private:
     static constexpr int LockCount = 64;
     static constexpr int MaxPly = 128;
     static constexpr int KillerSlots = 2;
-    static constexpr int LMRFullDepthMoves = 4;
-    static constexpr int LMRMinDepth = 3;
-    static constexpr int NMPMinDepth = 3;
-    static constexpr int NMPReduction = 3;
-    static constexpr int FutilityMargin1 = 400;
-    static constexpr int FutilityMargin2 = 900;
-    static constexpr int AspirationWindow = 50;
-    static constexpr int IIDMinDepth = 5;
+    int lmrFullDepthMoves_ = 4;
+    int lmrMinDepth_ = 3;
+    int nmpMinDepth_ = 3;
+    int nmpReduction_ = 3;
+    int futilityMargin1_ = 400;
+    int futilityMargin2_ = 900;
+    int aspirationWindow_ = 50;
+    int iidMinDepth_ = 5;
+    int deltaMargin_ = 1400;
+    int qDepth_ = 6;
+    int qCheckDepthMin_ = 4;
 
     NNUENetwork nnue_;
     MateSolver mateSolver_;

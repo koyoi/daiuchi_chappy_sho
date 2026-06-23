@@ -26,9 +26,6 @@ namespace shogi {
 namespace {
 
 constexpr int MateScore = 100000;
-constexpr int QuiescenceDepth = 6;
-constexpr int QCheckDepthMin = 4;
-constexpr int DeltaMargin = 1400;
 constexpr int ExactScore = 0;
 constexpr int LowerBound = 1;
 constexpr int UpperBound = 2;
@@ -178,8 +175,8 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
         int aspirationAlpha = -MateScore;
         int aspirationBeta = MateScore;
         if (depth >= 2 && std::abs(prevIterScore) < MateScore / 2) {
-            aspirationAlpha = prevIterScore - AspirationWindow;
-            aspirationBeta = prevIterScore + AspirationWindow;
+            aspirationAlpha = prevIterScore - aspirationWindow_;
+            aspirationBeta = prevIterScore + aspirationWindow_;
         }
 
         // Score root moves
@@ -354,21 +351,21 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
         return 0;
     }
 
-    if (depth <= 0) return quiescence(board, QuiescenceDepth, ply, alpha, beta, rootSide);
+    if (depth <= 0) return quiescence(board, qDepth_, ply, alpha, beta, rootSide);
 
     const bool inCheck = isKingAttacked(board, board.side);
     const bool maximizing = board.side == rootSide;
 
-    if (allowNullMove && !inCheck && depth >= NMPMinDepth && ply > 0) {
+    if (allowNullMove && !inCheck && depth >= nmpMinDepth_ && ply > 0) {
         NullMoveUndoInfo nullUndo;
         applyNullMove(board, nullUndo);
-        const int nullVal = search(board, depth - 1 - NMPReduction, ply + 1, alpha, beta, rootSide, false, Move{});
+        const int nullVal = search(board, depth - 1 - nmpReduction_, ply + 1, alpha, beta, rootSide, false, Move{});
         undoNullMove(board, nullUndo);
         if (maximizing) { if (nullVal >= beta) return nullVal; }
         else { if (nullVal <= alpha) return nullVal; }
     }
 
-    if (ttMove.to < 0 && depth >= IIDMinDepth && !inCheck) {
+    if (ttMove.to < 0 && depth >= iidMinDepth_ && !inCheck) {
         search(board, depth - 3, ply, alpha, beta, rootSide, false, prevMove);
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         const TranspositionEntry& slot = transposition_[ttIndex];
@@ -380,7 +377,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
     const bool canFutilityPrune = !inCheck && (depth == 1 || depth == 2);
     int staticEval = 0;
     if (canFutilityPrune) staticEval = eval(board, rootSide);
-    const int futilityMargin = depth == 1 ? FutilityMargin1 : FutilityMargin2;
+    const int futilityMargin = depth == 1 ? futilityMargin1_ : futilityMargin2_;
 
     if (maximizing) {
         int best = std::numeric_limits<int>::min();
@@ -406,7 +403,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
                 val = search(board, newDepth, ply + 1, alpha, beta, rootSide, true, move);
             } else {
                 bool needsFullWindow = false;
-                if (depth >= LMRMinDepth && moveIndex >= LMRFullDepthMoves && isQuiet && !isCheck && !inCheck && !givesCheckNow) {
+                if (depth >= lmrMinDepth_ && moveIndex >= lmrFullDepthMoves_ && isQuiet && !isCheck && !inCheck && !givesCheckNow) {
                     int R = 1 + (depth >= 6 ? 1 : 0) + (moveIndex >= 10 ? 1 : 0);
                     val = search(board, std::max(1, newDepth - R), ply + 1, alpha, alpha + 1, rootSide, true, move);
                     if (val > alpha) {
@@ -475,7 +472,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
             val = search(board, newDepth, ply + 1, alpha, beta, rootSide, true, move);
         } else {
             bool needsFullWindow = false;
-            if (depth >= LMRMinDepth && moveIndex >= LMRFullDepthMoves && isQuiet && !isCheck && !inCheck && !givesCheckNow) {
+            if (depth >= lmrMinDepth_ && moveIndex >= lmrFullDepthMoves_ && isQuiet && !isCheck && !inCheck && !givesCheckNow) {
                 int R = 1 + (depth >= 6 ? 1 : 0) + (moveIndex >= 10 ? 1 : 0);
                 val = search(board, std::max(1, newDepth - R), ply + 1, beta - 1, beta, rootSide, true, move);
                 if (val < beta) {
@@ -540,7 +537,7 @@ int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta
 
     if (maximizing) {
         if (standPat >= beta) return standPat;
-        if (!inCheck && standPat + DeltaMargin <= alpha) return standPat;
+        if (!inCheck && standPat + deltaMargin_ <= alpha) return standPat;
         alpha = std::max(alpha, standPat);
         int best = standPat;
         for (const Move& move : legal) {
@@ -548,7 +545,7 @@ int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta
                 const bool capture = !move.isDrop() && board.squares[move.to] != 0;
                 const bool promotion = move.promote;
                 if (!capture && !promotion) {
-                    if (depth < QCheckDepthMin || !givesCheck(board, move)) continue;
+                    if (depth < qCheckDepthMin_ || !givesCheck(board, move)) continue;
                 }
             }
             UndoInfo undo;
@@ -562,7 +559,7 @@ int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta
     }
 
     if (standPat <= alpha) return standPat;
-    if (!inCheck && standPat - DeltaMargin >= beta) return standPat;
+    if (!inCheck && standPat - deltaMargin_ >= beta) return standPat;
     beta = std::min(beta, standPat);
     int best = standPat;
     for (const Move& move : legal) {
@@ -570,7 +567,7 @@ int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta
             const bool capture = !move.isDrop() && board.squares[move.to] != 0;
             const bool promotion = move.promote;
             if (!capture && !promotion) {
-                if (depth < QCheckDepthMin || !givesCheck(board, move)) continue;
+                if (depth < qCheckDepthMin_ || !givesCheck(board, move)) continue;
             }
         }
         UndoInfo undo;
@@ -728,5 +725,36 @@ int NNUEEngine::threadCount() const { return threads_; }
 void NNUEEngine::setBookEnabled(bool enabled) { bookEnabled_ = enabled; }
 bool NNUEEngine::loadBook(const std::string& path) { return book_.load(path); }
 bool NNUEEngine::loadNNUE(const std::string& path) { return nnue_.load(path); }
+
+void NNUEEngine::setParam(const std::string& name, int value) {
+    if (name == "LMRFullDepthMoves") lmrFullDepthMoves_ = value;
+    else if (name == "LMRMinDepth") lmrMinDepth_ = value;
+    else if (name == "NMPMinDepth") nmpMinDepth_ = value;
+    else if (name == "NMPReduction") nmpReduction_ = value;
+    else if (name == "FutilityMargin1") futilityMargin1_ = value;
+    else if (name == "FutilityMargin2") futilityMargin2_ = value;
+    else if (name == "AspirationWindow") aspirationWindow_ = value;
+    else if (name == "IIDMinDepth") iidMinDepth_ = value;
+    else if (name == "DeltaMargin") deltaMargin_ = value;
+    else if (name == "QDepth") qDepth_ = value;
+    else if (name == "QCheckDepthMin") qCheckDepthMin_ = value;
+    else if (name == "RootPruneWidth") rootPruneWidth_ = value;
+}
+
+int NNUEEngine::getParam(const std::string& name) const {
+    if (name == "LMRFullDepthMoves") return lmrFullDepthMoves_;
+    if (name == "LMRMinDepth") return lmrMinDepth_;
+    if (name == "NMPMinDepth") return nmpMinDepth_;
+    if (name == "NMPReduction") return nmpReduction_;
+    if (name == "FutilityMargin1") return futilityMargin1_;
+    if (name == "FutilityMargin2") return futilityMargin2_;
+    if (name == "AspirationWindow") return aspirationWindow_;
+    if (name == "IIDMinDepth") return iidMinDepth_;
+    if (name == "DeltaMargin") return deltaMargin_;
+    if (name == "QDepth") return qDepth_;
+    if (name == "QCheckDepthMin") return qCheckDepthMin_;
+    if (name == "RootPruneWidth") return rootPruneWidth_;
+    return 0;
+}
 
 } // namespace shogi

@@ -75,6 +75,8 @@ void handleSetOption(NNUEEngine& engine, const std::vector<std::string>& words) 
             else
                 std::cout << "info string ERROR: failed to load NNUE: " << value << std::endl;
         }
+    } else {
+        try { engine.setParam(name, std::stoi(value)); } catch (...) {}
     }
 }
 
@@ -98,6 +100,18 @@ void nnueUsiLoop() {
             std::cout << "option name Threads type spin default " << engine.threadCount() << " min 1 max 256" << std::endl;
             std::cout << "option name NNUEFile type string default nnue.bin" << std::endl;
             std::cout << "option name Book type check default true" << std::endl;
+            std::cout << "option name LMRFullDepthMoves type spin default 4 min 1 max 20" << std::endl;
+            std::cout << "option name LMRMinDepth type spin default 3 min 1 max 10" << std::endl;
+            std::cout << "option name NMPMinDepth type spin default 3 min 1 max 10" << std::endl;
+            std::cout << "option name NMPReduction type spin default 3 min 1 max 8" << std::endl;
+            std::cout << "option name FutilityMargin1 type spin default 400 min 50 max 2000" << std::endl;
+            std::cout << "option name FutilityMargin2 type spin default 900 min 100 max 3000" << std::endl;
+            std::cout << "option name AspirationWindow type spin default 50 min 10 max 500" << std::endl;
+            std::cout << "option name IIDMinDepth type spin default 5 min 2 max 10" << std::endl;
+            std::cout << "option name DeltaMargin type spin default 1400 min 200 max 5000" << std::endl;
+            std::cout << "option name QDepth type spin default 6 min 1 max 20" << std::endl;
+            std::cout << "option name QCheckDepthMin type spin default 4 min 1 max 10" << std::endl;
+            std::cout << "option name RootPruneWidth type spin default 15 min 1 max 100" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
             if (!engine.loadNNUE("nnue.bin"))
