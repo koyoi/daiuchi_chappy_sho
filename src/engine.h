@@ -7,6 +7,7 @@
 #include "search_types.h"
 #include "shogi_types.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -49,9 +50,9 @@ public:
     MateResult searchMate(const Board& board, int timeLimitMs = 500);
 
 private:
-    int search(Board& board, int depth, int alpha, int beta, Color rootSide) const;
+    int search(Board& board, int depth, int ply, int alpha, int beta, Color rootSide, bool allowNullMove = true, const Move& prevMove = Move{}) const;
     std::vector<Move> extractPV(Board board, Color rootSide, int maxDepth) const;
-    int quiescence(Board& board, int depth, int alpha, int beta, Color rootSide) const;
+    int quiescence(Board& board, int depth, int ply, int alpha, int beta, Color rootSide) const;
     bool canForceMate(Board& board, int depth, Color attacker) const;
     bool isTacticalMove(const Board& board, const Move& move) const;
     std::vector<int> scoreRootMovesParallel(
@@ -61,14 +62,21 @@ private:
         Color rootSide,
         int depth,
         int pruneWidth,
+        int aspirationAlpha,
+        int aspirationBeta,
         const std::chrono::steady_clock::time_point& searchStart,
         const InfoCallback& infoCallback) const;
-    void orderMoves(const Board& board, MoveList& moves, Color rootSide) const;
-    int moveOrderScore(const Board& board, const Move& move, Color rootSide) const;
+    void orderMoves(const Board& board, MoveList& moves, Color rootSide, int ply, const Move& prevMove = Move{}) const;
+    int moveOrderScore(const Board& board, const Move& move, Color rootSide, int ply, const Move& ttMove, const Move& prevMove = Move{}) const;
     bool shouldStop() const;
     std::uint64_t boardHash(const Board& board, Color rootSide) const;
     void setLastSearchInfo(const SearchInfo& info) const;
     int depthLimit() const;
+    void clearSearchTables() const;
+    void storeKiller(int ply, const Move& move) const;
+    void updateHistory(Color side, const Move& move, int depth, bool good) const;
+    void storeCounterMove(Color side, const Move& prevMove, const Move& counterMove) const;
+    void analyzeSubGoals(const Board& board, Color rootSide) const;
 
     struct TranspositionEntry {
         std::uint64_t key = 0;
@@ -83,6 +91,20 @@ private:
     static constexpr int TTSize = 1 << TTBits;
     static constexpr int TTMask = TTSize - 1;
     static constexpr int LockCount = 64;
+    static constexpr int MaxPly = 128;
+    static constexpr int KillerSlots = 2;
+    static constexpr int LMRFullDepthMoves = 4;
+    static constexpr int LMRMinDepth = 3;
+    static constexpr int NMPMinDepth = 3;
+    static constexpr int NMPReduction = 3;
+    static constexpr int FutilityMargin1 = 400;
+    static constexpr int FutilityMargin2 = 900;
+    static constexpr int AspirationWindow = 50;
+    static constexpr int IIDMinDepth = 5;
+    static constexpr int MaxExtensions = 16;
+    static constexpr int SubGoalDepth = 3;
+    static constexpr int SubGoalThreshold = 200;
+    static constexpr int SubGoalCaptureBonus = 2000;
 
     Evaluator evaluator_;
     OnlineLearner learner_;
@@ -97,6 +119,10 @@ private:
     mutable std::atomic_uint64_t nodes_{0};
     mutable SearchInfo lastSearchInfo_{};
     mutable std::mutex lastSearchInfoMutex_;
+    mutable std::array<std::array<Move, KillerSlots>, MaxPly> killers_{};
+    mutable std::array<std::array<std::array<std::int16_t, BoardSize>, BoardSize>, 2> history_{};
+    mutable std::array<std::array<std::array<Move, BoardSize>, BoardSize>, 2> counterMoves_{};
+    mutable std::array<bool, PieceTypeCount> targetPieces_{};
     int maxMoveTimeMs_ = 1000;
     int threads_ = 1;
     std::mt19937 rng_;

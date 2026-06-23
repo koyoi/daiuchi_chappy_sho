@@ -144,6 +144,10 @@ struct UndoInfo {
     int materialScore = 0;
 };
 
+struct NullMoveUndoInfo {
+    std::uint64_t hash = 0;
+};
+
 struct Board {
     std::array<int, BoardSize> squares{};
     std::array<int, 15> blackHand{};

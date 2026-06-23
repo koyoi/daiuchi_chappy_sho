@@ -13,6 +13,8 @@ bool setPosition(Board& board, const std::vector<std::string>& words);
 void applyMove(Board& board, const Move& move);
 void applyMove(Board& board, const Move& move, UndoInfo& undo);
 void undoMove(Board& board, const Move& move, const UndoInfo& undo);
+void applyNullMove(Board& board, NullMoveUndoInfo& undo);
+void undoNullMove(Board& board, const NullMoveUndoInfo& undo);
 bool sameMove(const Move& left, const Move& right);
 
 } // namespace shogi

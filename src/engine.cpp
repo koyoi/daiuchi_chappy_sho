@@ -313,7 +313,7 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
         }
     }
 
-    orderMoves(board, legal, rootSide);
+    orderMoves(board, legal, rootSide, 0);
 
     std::vector<int> openingPenalties(legal.size(), 0);
     if (openingSafety_) {
@@ -322,13 +322,35 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
         }
     }
 
+    clearSearchTables();
+
     int completedDepth = 0;
     int bestScore = std::numeric_limits<int>::min();
+    int prevIterScore = 0;
     std::vector<Move> bestMoves;
     const int maxDepth = depthLimit();
     const int pruneWidth = rootPruneWidth_;
     for (int depth = 1; depth <= maxDepth && !shouldStop(); ++depth) {
-        const std::vector<int> scores = scoreRootMovesParallel(board, legal, openingPenalties, rootSide, depth, pruneWidth, searchStart, infoCallback);
+        int aspirationAlpha = -MateScore;
+        int aspirationBeta = MateScore;
+        if (depth >= 2 && std::abs(prevIterScore) < MateScore / 2) {
+            aspirationAlpha = prevIterScore - AspirationWindow;
+            aspirationBeta = prevIterScore + AspirationWindow;
+        }
+
+        std::vector<int> scores = scoreRootMovesParallel(board, legal, openingPenalties, rootSide, depth, pruneWidth, aspirationAlpha, aspirationBeta, searchStart, infoCallback);
+
+        if (!shouldStop() && depth >= 2 && std::abs(prevIterScore) < MateScore / 2) {
+            int depthBest = std::numeric_limits<int>::min();
+            for (int i = 0; i < static_cast<int>(legal.size()); ++i) {
+                if (scores[i] != std::numeric_limits<int>::min()) {
+                    depthBest = std::max(depthBest, scores[i]);
+                }
+            }
+            if (depthBest != std::numeric_limits<int>::min() && (depthBest <= aspirationAlpha || depthBest >= aspirationBeta)) {
+                scores = scoreRootMovesParallel(board, legal, openingPenalties, rootSide, depth, pruneWidth, -MateScore, MateScore, searchStart, infoCallback);
+            }
+        }
 
         if (shouldStop()) {
             break;
@@ -395,6 +417,7 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
             }
             legal = reordered;
             openingPenalties = reorderedPenalties;
+            prevIterScore = depthBestScore;
         }
     }
 
@@ -513,7 +536,54 @@ SearchInfo LearningEngine::lastSearchInfo() const {
     return lastSearchInfo_;
 }
 
-int LearningEngine::search(Board& board, int depth, int alpha, int beta, Color rootSide) const {
+void LearningEngine::clearSearchTables() const {
+    for (auto& ply : killers_) {
+        for (auto& slot : ply) {
+            slot = Move{};
+        }
+    }
+    for (auto& color : history_) {
+        for (auto& from : color) {
+            for (auto& val : from) {
+                val /= 2;
+            }
+        }
+    }
+    for (auto& color : counterMoves_) {
+        for (auto& from : color) {
+            for (auto& m : from) {
+                m = Move{};
+            }
+        }
+    }
+}
+
+void LearningEngine::storeCounterMove(Color side, const Move& prevMove, const Move& counterMove) const {
+    if (prevMove.to < 0) return;
+    const int colorIdx = side == Black ? 0 : 1;
+    const int from = prevMove.isDrop() ? prevMove.to : prevMove.from;
+    if (from < 0 || from >= BoardSize || prevMove.to < 0 || prevMove.to >= BoardSize) return;
+    counterMoves_[colorIdx][from][prevMove.to] = counterMove;
+}
+
+void LearningEngine::storeKiller(int ply, const Move& move) const {
+    if (ply >= MaxPly) return;
+    if (sameMove(move, killers_[ply][0])) return;
+    killers_[ply][1] = killers_[ply][0];
+    killers_[ply][0] = move;
+}
+
+void LearningEngine::updateHistory(Color side, const Move& move, int depth, bool good) const {
+    if (move.isDrop() || move.promote) return;
+    if (move.from < 0 || move.from >= BoardSize || move.to < 0 || move.to >= BoardSize) return;
+    const int colorIdx = side == Black ? 0 : 1;
+    const int bonus = good ? depth * depth : -(depth * depth);
+    int entry = history_[colorIdx][move.from][move.to];
+    entry += bonus - entry * std::abs(bonus) / 16384;
+    history_[colorIdx][move.from][move.to] = static_cast<std::int16_t>(std::clamp(entry, -16384, 16384));
+}
+
+int LearningEngine::search(Board& board, int depth, int ply, int alpha, int beta, Color rootSide, bool allowNullMove, const Move& prevMove) const {
     nodes_.fetch_add(1);
     if (shouldStop()) {
         return evaluator_.evaluate(board, rootSide);
@@ -524,20 +594,24 @@ int LearningEngine::search(Board& board, int depth, int alpha, int beta, Color r
     const std::uint64_t key = boardHash(board, rootSide);
     const int ttIndex = static_cast<int>(key & TTMask);
     const int lockIndex = static_cast<int>((key >> TTBits) % LockCount);
+    Move ttMove{};
     {
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         const TranspositionEntry& slot = transposition_[ttIndex];
-        if (slot.key == key && slot.generation == ttGeneration_ && slot.depth >= depth) {
-            if (slot.flag == ExactScore) {
-                return slot.score;
-            }
-            if (slot.flag == LowerBound) {
-                alpha = std::max(alpha, slot.score);
-            } else if (slot.flag == UpperBound) {
-                beta = std::min(beta, slot.score);
-            }
-            if (alpha >= beta) {
-                return slot.score;
+        if (slot.key == key && slot.generation == ttGeneration_) {
+            ttMove = slot.bestMove;
+            if (slot.depth >= depth) {
+                if (slot.flag == ExactScore) {
+                    return slot.score;
+                }
+                if (slot.flag == LowerBound) {
+                    alpha = std::max(alpha, slot.score);
+                } else if (slot.flag == UpperBound) {
+                    beta = std::min(beta, slot.score);
+                }
+                if (alpha >= beta) {
+                    return slot.score;
+                }
             }
         }
     }
@@ -551,28 +625,129 @@ int LearningEngine::search(Board& board, int depth, int alpha, int beta, Color r
     }
 
     if (depth <= 0) {
-        return quiescence(board, QuiescenceDepth, alpha, beta, rootSide);
+        return quiescence(board, QuiescenceDepth, ply, alpha, beta, rootSide);
     }
 
-    orderMoves(board, legal, rootSide);
+    const bool inCheck = isKingAttacked(board, board.side);
+    const bool maximizing = board.side == rootSide;
 
-    if (board.side == rootSide) {
+    // Null Move Pruning
+    if (allowNullMove && !inCheck && depth >= NMPMinDepth && ply > 0) {
+        NullMoveUndoInfo nullUndo;
+        applyNullMove(board, nullUndo);
+        const int nullVal = search(board, depth - 1 - NMPReduction, ply + 1, alpha, beta, rootSide, false, Move{});
+        undoNullMove(board, nullUndo);
+
+        if (maximizing) {
+            if (nullVal >= beta) {
+                return nullVal;
+            }
+        } else {
+            if (nullVal <= alpha) {
+                return nullVal;
+            }
+        }
+    }
+
+    // Internal Iterative Deepening
+    if (ttMove.to < 0 && depth >= IIDMinDepth && !inCheck) {
+        search(board, depth - 3, ply, alpha, beta, rootSide, false, prevMove);
+        std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
+        const TranspositionEntry& slot = transposition_[ttIndex];
+        if (slot.key == key && slot.generation == ttGeneration_) {
+            ttMove = slot.bestMove;
+        }
+    }
+
+    orderMoves(board, legal, rootSide, ply, prevMove);
+
+    // Futility pruning setup
+    const bool canFutilityPrune = !inCheck && (depth == 1 || depth == 2);
+    int staticEval = 0;
+    if (canFutilityPrune) {
+        staticEval = evaluator_.evaluate(board, rootSide);
+    }
+    const int futilityMargin = depth == 1 ? FutilityMargin1 : FutilityMargin2;
+
+    if (maximizing) {
         int best = std::numeric_limits<int>::min();
         Move bestMoveLocal{};
+        Move quietsTried[MoveList::Capacity];
+        int quietsCount = 0;
+        int moveIndex = 0;
+        bool anySearched = false;
+
         for (const Move& move : legal) {
+            const bool isQuiet = (move.isDrop() || board.squares[move.to] == 0) && !move.promote;
+            const bool isCheck = givesCheck(board, move);
+
+            if (canFutilityPrune && isQuiet && !isCheck && staticEval + futilityMargin <= alpha) {
+                ++moveIndex;
+                continue;
+            }
+
             UndoInfo undo;
             applyMove(board, move, undo);
-            const int val = search(board, depth - 1, alpha, beta, rootSide);
+
+            const bool givesCheckNow = isKingAttacked(board, board.side);
+            int extension = (givesCheckNow && ply < MaxPly - 10) ? 1 : 0;
+            const int newDepth = depth - 1 + extension;
+
+            int val = 0;
+            if (moveIndex == 0) {
+                val = search(board, newDepth, ply + 1, alpha, beta, rootSide, true, move);
+            } else {
+                bool needsFullWindow = false;
+                if (depth >= LMRMinDepth && moveIndex >= LMRFullDepthMoves && isQuiet && !isCheck && !inCheck && !givesCheckNow) {
+                    int R = 1 + (depth >= 6 ? 1 : 0) + (moveIndex >= 10 ? 1 : 0);
+                    int reducedDepth = std::max(1, newDepth - R);
+                    val = search(board, reducedDepth, ply + 1, alpha, alpha + 1, rootSide, true, move);
+                    if (val > alpha) {
+                        val = search(board, newDepth, ply + 1, alpha, alpha + 1, rootSide, true, move);
+                        if (val > alpha && val < beta) {
+                            needsFullWindow = true;
+                        }
+                    }
+                } else {
+                    val = search(board, newDepth, ply + 1, alpha, alpha + 1, rootSide, true, move);
+                    if (val > alpha && val < beta) {
+                        needsFullWindow = true;
+                    }
+                }
+                if (needsFullWindow) {
+                    val = search(board, newDepth, ply + 1, alpha, beta, rootSide, true, move);
+                }
+            }
+
             undoMove(board, move, undo);
+            anySearched = true;
+
             if (val > best) {
                 best = val;
                 bestMoveLocal = move;
             }
             alpha = std::max(alpha, best);
             if (alpha >= beta) {
+                if (isQuiet) {
+                    storeKiller(ply, move);
+                    updateHistory(board.side, move, depth, true);
+                    storeCounterMove(board.side, prevMove, move);
+                    for (int q = 0; q < quietsCount; ++q) {
+                        updateHistory(board.side, quietsTried[q], depth, false);
+                    }
+                }
                 break;
             }
+            if (isQuiet && quietsCount < MoveList::Capacity) {
+                quietsTried[quietsCount++] = move;
+            }
+            ++moveIndex;
         }
+
+        if (!anySearched) {
+            return canFutilityPrune ? staticEval : (board.side == rootSide ? -MateScore - depth : MateScore + depth);
+        }
+
         {
             std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
             TranspositionEntry& slot = transposition_[ttIndex];
@@ -588,22 +763,85 @@ int LearningEngine::search(Board& board, int depth, int alpha, int beta, Color r
         return best;
     }
 
+    // Minimizing branch
     int best = std::numeric_limits<int>::max();
     Move bestMoveLocal{};
+    Move quietsTried[MoveList::Capacity];
+    int quietsCount = 0;
+    int moveIndex = 0;
+    bool anySearched = false;
+
     for (const Move& move : legal) {
+        const bool isQuiet = (move.isDrop() || board.squares[move.to] == 0) && !move.promote;
+        const bool isCheck = givesCheck(board, move);
+
+        if (canFutilityPrune && isQuiet && !isCheck && staticEval - futilityMargin >= beta) {
+            ++moveIndex;
+            continue;
+        }
+
         UndoInfo undo;
         applyMove(board, move, undo);
-        const int val = search(board, depth - 1, alpha, beta, rootSide);
+
+        const bool givesCheckNow = isKingAttacked(board, board.side);
+        int extension = (givesCheckNow && ply < MaxPly - 10) ? 1 : 0;
+        const int newDepth = depth - 1 + extension;
+
+        int val = 0;
+        if (moveIndex == 0) {
+            val = search(board, newDepth, ply + 1, alpha, beta, rootSide, true, move);
+        } else {
+            bool needsFullWindow = false;
+            if (depth >= LMRMinDepth && moveIndex >= LMRFullDepthMoves && isQuiet && !isCheck && !inCheck && !givesCheckNow) {
+                int R = 1 + (depth >= 6 ? 1 : 0) + (moveIndex >= 10 ? 1 : 0);
+                int reducedDepth = std::max(1, newDepth - R);
+                val = search(board, reducedDepth, ply + 1, beta - 1, beta, rootSide, true, move);
+                if (val < beta) {
+                    val = search(board, newDepth, ply + 1, beta - 1, beta, rootSide, true, move);
+                    if (val < beta && val > alpha) {
+                        needsFullWindow = true;
+                    }
+                }
+            } else {
+                val = search(board, newDepth, ply + 1, beta - 1, beta, rootSide, true, move);
+                if (val < beta && val > alpha) {
+                    needsFullWindow = true;
+                }
+            }
+            if (needsFullWindow) {
+                val = search(board, newDepth, ply + 1, alpha, beta, rootSide, true, move);
+            }
+        }
+
         undoMove(board, move, undo);
+        anySearched = true;
+
         if (val < best) {
             best = val;
             bestMoveLocal = move;
         }
         beta = std::min(beta, best);
         if (alpha >= beta) {
+            if (isQuiet) {
+                storeKiller(ply, move);
+                updateHistory(board.side, move, depth, true);
+                storeCounterMove(board.side, prevMove, move);
+                for (int q = 0; q < quietsCount; ++q) {
+                    updateHistory(board.side, quietsTried[q], depth, false);
+                }
+            }
             break;
         }
+        if (isQuiet && quietsCount < MoveList::Capacity) {
+            quietsTried[quietsCount++] = move;
+        }
+        ++moveIndex;
     }
+
+    if (!anySearched) {
+        return canFutilityPrune ? staticEval : (board.side == rootSide ? -MateScore - depth : MateScore + depth);
+    }
+
     {
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         TranspositionEntry& slot = transposition_[ttIndex];
@@ -619,7 +857,7 @@ int LearningEngine::search(Board& board, int depth, int alpha, int beta, Color r
     return best;
 }
 
-int LearningEngine::quiescence(Board& board, int depth, int alpha, int beta, Color rootSide) const {
+int LearningEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta, Color rootSide) const {
     nodes_.fetch_add(1);
     if (shouldStop()) {
         return evaluator_.evaluate(board, rootSide);
@@ -641,7 +879,7 @@ int LearningEngine::quiescence(Board& board, int depth, int alpha, int beta, Col
     const bool maximizing = board.side == rootSide;
     const bool inCheck = isKingAttacked(board, board.side);
 
-    orderMoves(board, legal, rootSide);
+    orderMoves(board, legal, rootSide, ply);
 
     if (maximizing) {
         if (standPat >= beta) {
@@ -664,7 +902,7 @@ int LearningEngine::quiescence(Board& board, int depth, int alpha, int beta, Col
             }
             UndoInfo undo;
             applyMove(board, move, undo);
-            best = std::max(best, quiescence(board, depth - 1, alpha, beta, rootSide));
+            best = std::max(best, quiescence(board, depth - 1, ply + 1, alpha, beta, rootSide));
             undoMove(board, move, undo);
             alpha = std::max(alpha, best);
             if (alpha >= beta) {
@@ -694,7 +932,7 @@ int LearningEngine::quiescence(Board& board, int depth, int alpha, int beta, Col
         }
         UndoInfo undo;
         applyMove(board, move, undo);
-        best = std::min(best, quiescence(board, depth - 1, alpha, beta, rootSide));
+        best = std::min(best, quiescence(board, depth - 1, ply + 1, alpha, beta, rootSide));
         undoMove(board, move, undo);
         beta = std::min(beta, best);
         if (alpha >= beta) {
@@ -717,7 +955,7 @@ bool LearningEngine::canForceMate(Board& board, int depth, Color attacker) const
         return false;
     }
 
-    orderMoves(board, legal, attacker);
+    orderMoves(board, legal, attacker, 0);
 
     if (board.side == attacker) {
         for (const Move& move : legal) {
@@ -761,6 +999,8 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
     Color rootSide,
     int depth,
     int pruneWidth,
+    int aspirationAlpha,
+    int aspirationBeta,
     const std::chrono::steady_clock::time_point& searchStart,
     const InfoCallback& infoCallback) const {
     std::vector<int> scores(orderedMoves.size(), std::numeric_limits<int>::min());
@@ -774,6 +1014,7 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
     Move bestMove;
     bool hasBestMove = false;
     auto lastEmit = searchStart - std::chrono::milliseconds(1000);
+    std::atomic<int> sharedAlpha{aspirationAlpha};
 
     auto publish = [&](int index, int score, bool force) {
         SearchInfo info;
@@ -812,6 +1053,7 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
 
     const int workerCount = std::min<int>(std::max(1, threads_), orderedMoves.size());
     if (workerCount <= 1) {
+        int runningAlpha = aspirationAlpha;
         for (int i = 0; i < orderedMoves.size(); ++i) {
             if (shouldStop()) {
                 break;
@@ -822,10 +1064,11 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
             if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) {
                 searchDepth = std::max(0, depth - 3);
             }
-            scores[i] = search(next, searchDepth, -MateScore, MateScore, rootSide);
+            scores[i] = search(next, searchDepth, 1, runningAlpha, aspirationBeta, rootSide, true, orderedMoves[i]);
             if (i < static_cast<int>(openingPenalties.size())) {
                 scores[i] -= openingPenalties[i];
             }
+            runningAlpha = std::max(runningAlpha, scores[i]);
             publish(i, scores[i], i + 1 == orderedMoves.size());
         }
         return scores;
@@ -835,10 +1078,10 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
     std::vector<std::thread> workers;
     workers.reserve(workerCount);
     for (int worker = 0; worker < workerCount; ++worker) {
-        workers.emplace_back([&, rootSide, pruneWidth]() {
+        workers.emplace_back([&, rootSide, pruneWidth, aspirationBeta]() {
             while (!shouldStop()) {
                 const int index = nextIndex.fetch_add(1);
-                if (index >= orderedMoves.size()) {
+                if (index >= static_cast<int>(orderedMoves.size())) {
                     break;
                 }
                 Board next = board;
@@ -847,11 +1090,18 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
                 if (pruneWidth > 0 && depth >= 3 && index >= pruneWidth) {
                     searchDepth = std::max(0, depth - 3);
                 }
-                scores[index] = search(next, searchDepth, -MateScore, MateScore, rootSide);
+                const int localAlpha = sharedAlpha.load(std::memory_order_relaxed);
+                scores[index] = search(next, searchDepth, 1, localAlpha, aspirationBeta, rootSide, true, orderedMoves[index]);
                 if (index < static_cast<int>(openingPenalties.size())) {
                     scores[index] -= openingPenalties[index];
                 }
-                publish(index, scores[index], index + 1 == orderedMoves.size());
+                int expected = sharedAlpha.load(std::memory_order_relaxed);
+                while (scores[index] > expected) {
+                    if (sharedAlpha.compare_exchange_weak(expected, scores[index], std::memory_order_relaxed)) {
+                        break;
+                    }
+                }
+                publish(index, scores[index], index + 1 == static_cast<int>(orderedMoves.size()));
             }
         });
     }
@@ -863,7 +1113,19 @@ std::vector<int> LearningEngine::scoreRootMovesParallel(
     return scores;
 }
 
-void LearningEngine::orderMoves(const Board& board, MoveList& moves, Color rootSide) const {
+void LearningEngine::orderMoves(const Board& board, MoveList& moves, Color rootSide, int ply, const Move& prevMove) const {
+    const std::uint64_t key = boardHash(board, rootSide);
+    const int ttIndex = static_cast<int>(key & TTMask);
+    const int lockIndex = static_cast<int>((key >> TTBits) % LockCount);
+    Move ttMove{};
+    {
+        std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
+        const TranspositionEntry& slot = transposition_[ttIndex];
+        if (slot.key == key && slot.generation == ttGeneration_) {
+            ttMove = slot.bestMove;
+        }
+    }
+
     struct ScoredMove {
         Move move;
         int score;
@@ -871,7 +1133,7 @@ void LearningEngine::orderMoves(const Board& board, MoveList& moves, Color rootS
     const int n = moves.size();
     ScoredMove scored[MoveList::Capacity];
     for (int i = 0; i < n; ++i) {
-        scored[i] = {moves[i], moveOrderScore(board, moves[i], rootSide)};
+        scored[i] = {moves[i], moveOrderScore(board, moves[i], rootSide, ply, ttMove, prevMove)};
     }
     std::stable_sort(scored, scored + n, [](const ScoredMove& left, const ScoredMove& right) {
         return left.score > right.score;
@@ -881,23 +1143,74 @@ void LearningEngine::orderMoves(const Board& board, MoveList& moves, Color rootS
     }
 }
 
-int LearningEngine::moveOrderScore(const Board& board, const Move& move, Color rootSide) const {
+int LearningEngine::moveOrderScore(const Board& board, const Move& move, Color rootSide, int ply, const Move& ttMove, const Move& prevMove) const {
     (void)rootSide;
+
+    if (ttMove.to >= 0 && sameMove(move, ttMove)) {
+        return 20000;
+    }
+
     int score = 0;
+
     if (!move.isDrop() && board.squares[move.to] != 0) {
         const PieceType captured = typeOf(board.squares[move.to]);
         const PieceType moving = typeOf(board.squares[move.from]);
         score += 10000 + pieceValue(captured) * 10 - pieceValue(moving);
     }
-    if (move.promote) {
-        score += 6000;
-    }
-    if (move.isDrop()) {
-        score += pieceValue(move.drop) / 3;
-    }
+
     if (givesCheck(board, move)) {
         score += 8000;
     }
+
+    if (move.promote) {
+        score += 6000;
+    }
+
+    if (score >= 6000) {
+        return score;
+    }
+
+    if (ply < MaxPly) {
+        if (sameMove(move, killers_[ply][0])) {
+            return 5000;
+        }
+        if (sameMove(move, killers_[ply][1])) {
+            return 4900;
+        }
+    }
+
+    if (prevMove.to >= 0) {
+        const int colorIdx = board.side == Black ? 0 : 1;
+        const int prevFrom = prevMove.isDrop() ? prevMove.to : prevMove.from;
+        if (prevFrom >= 0 && prevFrom < BoardSize && prevMove.to >= 0 && prevMove.to < BoardSize) {
+            if (sameMove(move, counterMoves_[colorIdx][prevFrom][prevMove.to])) {
+                return 4800;
+            }
+        }
+    }
+
+    if (move.isDrop()) {
+        score += pieceValue(move.drop) / 3;
+
+        const int enemyKing = board.side == Black ? board.whiteKingSquare : board.blackKingSquare;
+        if (enemyKing >= 0 && chebyshevDistance(move.to, enemyKing) <= 2) {
+            score += 200;
+        }
+    } else if (board.squares[move.to] == 0) {
+        const int colorIdx = board.side == Black ? 0 : 1;
+        if (move.from >= 0 && move.from < BoardSize) {
+            score += history_[colorIdx][move.from][move.to];
+        }
+
+        const Color enemy = opposite(board.side);
+        if (isSquareAttacked(board, move.to, enemy)) {
+            const int enemyKing = board.side == Black ? board.whiteKingSquare : board.blackKingSquare;
+            if (enemyKing >= 0 && chebyshevDistance(move.to, enemyKing) <= 2) {
+                score += 300;
+            }
+        }
+    }
+
     return score;
 }
 

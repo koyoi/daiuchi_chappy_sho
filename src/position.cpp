@@ -242,6 +242,19 @@ void undoMove(Board& board, const Move& move, const UndoInfo& undo) {
     }
 }
 
+void applyNullMove(Board& board, NullMoveUndoInfo& undo) {
+    undo.hash = board.hash;
+    board.hash ^= zobrist::sideKey();
+    board.side = opposite(board.side);
+    ++board.moveNumber;
+}
+
+void undoNullMove(Board& board, const NullMoveUndoInfo& undo) {
+    board.side = opposite(board.side);
+    --board.moveNumber;
+    board.hash = undo.hash;
+}
+
 bool sameMove(const Move& left, const Move& right) {
     return left.from == right.from && left.to == right.to && left.drop == right.drop && left.promote == right.promote;
 }

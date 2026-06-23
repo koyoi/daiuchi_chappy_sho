@@ -40,6 +40,7 @@ constexpr std::array<double, FeatureCount> DefaultWeights = {
     50.0, 40.0,
     10.0,
     60.0, 30.0, 25.0, 20.0, 120.0, -20.0, -15.0, 18.0,
+    50.0, 15.0,
 };
 
 constexpr int PstRank[PieceTypeCount][9] = {
@@ -979,6 +980,53 @@ FeatureVector Evaluator::extractFeatures(const Board& board, Color perspective) 
         features[95] = features[43] * openingness;
         features[96] = features[53] * openingness;
         features[97] = features[75] * endgameness;
+    }
+
+    // Fork detection (98)
+    {
+        auto forkScore = [&](Color side) -> int {
+            int ci = side == Black ? 0 : 1;
+            int ei = 1 - ci;
+            int total = 0;
+            for (int sq = 0; sq < BoardSize; ++sq) {
+                if (!board.occupied[ci].test(sq)) continue;
+                PieceType pt = typeOf(board.squares[sq]);
+                if (pt == King || pt == Pawn) continue;
+                int attackedCount = 0;
+                int attackedValue = 0;
+                for (int esq = 0; esq < BoardSize; ++esq) {
+                    if (!board.occupied[ei].test(esq)) continue;
+                    PieceType ept = typeOf(board.squares[esq]);
+                    if (ept == King || ept == Pawn) continue;
+                    if (attacksSquare(board, sq, esq)) {
+                        ++attackedCount;
+                        attackedValue += pieceValue(ept);
+                    }
+                }
+                if (attackedCount >= 2) {
+                    total += attackedValue;
+                }
+            }
+            return total;
+        };
+        features[98] = (forkScore(perspective) - forkScore(enemy)) / 100.0;
+    }
+
+    // Piece coordination (99)
+    {
+        auto coordination = [&](Color side) -> int {
+            int ci = side == Black ? 0 : 1;
+            int count = 0;
+            for (int sq = 0; sq < BoardSize; ++sq) {
+                if (!board.occupied[ci].test(sq)) continue;
+                PieceType pt = typeOf(board.squares[sq]);
+                if (pt == King) continue;
+                int defenders = attackersFromMap(attacks, sq, side);
+                if (defenders > 0) ++count;
+            }
+            return count;
+        };
+        features[99] = coordination(perspective) - coordination(enemy);
     }
 
     return features;
