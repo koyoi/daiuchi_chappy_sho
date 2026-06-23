@@ -1,6 +1,10 @@
 #include "nn_bridge.h"
 #include "movegen.h"
 
+#ifdef HAS_ONNXRUNTIME
+#include "onnx_inference.h"
+#endif
+
 #include <algorithm>
 #include <cstring>
 #include <sstream>
@@ -121,6 +125,37 @@ NNBridge::~NNBridge() {
     shutdown();
 }
 
+#ifdef HAS_ONNXRUNTIME
+bool NNBridge::tryOnnx() {
+    if (onnxAttempted_) return onnx_ && onnx_->isLoaded();
+    onnxAttempted_ = true;
+
+    // Check for .onnx file alongside .pt model
+    std::string onnxPath = settings_.model;
+    auto dotPos = onnxPath.rfind('.');
+    if (dotPos != std::string::npos) {
+        onnxPath = onnxPath.substr(0, dotPos) + ".onnx";
+    } else {
+        onnxPath += ".onnx";
+    }
+
+    // Also check without extension change if model already ends in .onnx
+    if (settings_.model.size() >= 5 &&
+        settings_.model.substr(settings_.model.size() - 5) == ".onnx") {
+        onnxPath = settings_.model;
+    }
+
+    onnx_ = std::make_unique<OnnxInference>();
+    if (onnx_->loadModel(onnxPath, settings_.device)) {
+        lastError_.clear();
+        return true;
+    }
+    lastError_ = "ONNX load failed: " + onnx_->lastError();
+    onnx_.reset();
+    return false;
+}
+#endif
+
 void NNBridge::setEnabled(bool enabled) { settings_.enabled = enabled; }
 bool NNBridge::enabled() const { return settings_.enabled; }
 void NNBridge::setPython(const std::string& p) { if (!p.empty()) settings_.python = p; }
@@ -129,6 +164,10 @@ void NNBridge::setModel(const std::string& m) {
     if (!m.empty() && m != settings_.model) {
         shutdown();
         settings_.model = m;
+#ifdef HAS_ONNXRUNTIME
+        onnx_.reset();
+        onnxAttempted_ = false;
+#endif
     }
 }
 void NNBridge::setDevice(const std::string& d) { if (!d.empty()) settings_.device = d; }
@@ -143,6 +182,9 @@ NNOutput NNBridge::makeFallbackOutput() const {
 #ifdef _WIN32
 
 bool NNBridge::ensureProcess() {
+#ifdef HAS_ONNXRUNTIME
+    if (tryOnnx()) return true;
+#endif
     if (processRunning_) return true;
     if (!settings_.enabled) return false;
 
@@ -235,6 +277,9 @@ std::string NNBridge::recvLine() {
 #else // POSIX
 
 bool NNBridge::ensureProcess() {
+#ifdef HAS_ONNXRUNTIME
+    if (tryOnnx()) return true;
+#endif
     if (processRunning_) return true;
     if (!settings_.enabled) return false;
 
@@ -332,6 +377,9 @@ std::string NNBridge::recvLine(int timeoutMs) {
 
 NNOutput NNBridge::evaluate(const Board& board) {
     std::lock_guard<std::mutex> lock(mutex_);
+#ifdef HAS_ONNXRUNTIME
+    if (tryOnnx()) return onnx_->evaluate(board);
+#endif
     if (!ensureProcess()) return makeFallbackOutput();
 
     std::string encoded = encodeBoardState(board);
@@ -361,6 +409,9 @@ NNOutput NNBridge::evaluate(const Board& board) {
 
 std::vector<NNOutput> NNBridge::evaluateBatch(const std::vector<Board>& boards) {
     std::lock_guard<std::mutex> lock(mutex_);
+#ifdef HAS_ONNXRUNTIME
+    if (tryOnnx()) return onnx_->evaluateBatch(boards);
+#endif
     if (!ensureProcess() || boards.empty()) {
         std::vector<NNOutput> fallback(boards.size());
         for (auto& o : fallback) o = makeFallbackOutput();

@@ -30,21 +30,31 @@ MCTSNode* MCTSEngine::select(MCTSNode* node) const {
     return node;
 }
 
-void MCTSEngine::expand(MCTSNode* node, const Board& board) {
+bool MCTSEngine::expandMoves(MCTSNode* node, const Board& board) {
     auto legal = generateLegalMoves(board);
+    node->expanded = true;
     if (legal.empty()) {
-        node->expanded = true;
-        return;
+        return false;
     }
+    node->children.reserve(legal.size());
+    for (std::size_t i = 0; i < legal.size(); ++i) {
+        auto child = std::make_unique<MCTSNode>();
+        child->move = legal[i];
+        child->parent = node;
+        child->prior = 1.0 / static_cast<double>(legal.size());
+        node->children.push_back(std::move(child));
+    }
+    return true;
+}
 
-    NNOutput out = nn_.evaluate(board);
-
+void MCTSEngine::applyNNOutput(MCTSNode* node, const NNOutput& output, const Board& board) {
+    if (node->children.empty()) return;
     double priorSum = 0.0;
-    std::vector<double> priors(legal.size());
-    for (int i = 0; i < legal.size(); ++i) {
-        int idx = nn_.moveToIndex(legal[i], board.side);
-        if (idx >= 0 && idx < static_cast<int>(out.policy.size())) {
-            priors[i] = out.policy[idx];
+    std::vector<double> priors(node->children.size());
+    for (std::size_t i = 0; i < node->children.size(); ++i) {
+        int idx = NNBridge::moveToIndex(node->children[i]->move, board.side);
+        if (idx >= 0 && idx < static_cast<int>(output.policy.size())) {
+            priors[i] = output.policy[idx];
         } else {
             priors[i] = 1e-6;
         }
@@ -53,19 +63,32 @@ void MCTSEngine::expand(MCTSNode* node, const Board& board) {
     if (priorSum > 0) {
         for (auto& p : priors) p /= priorSum;
     } else {
-        double uniform = 1.0 / legal.size();
+        double uniform = 1.0 / static_cast<double>(node->children.size());
         for (auto& p : priors) p = uniform;
     }
-
-    node->children.reserve(legal.size());
-    for (int i = 0; i < legal.size(); ++i) {
-        auto child = std::make_unique<MCTSNode>();
-        child->move = legal[i];
-        child->parent = node;
-        child->prior = priors[i];
-        node->children.push_back(std::move(child));
+    for (std::size_t i = 0; i < node->children.size(); ++i) {
+        node->children[i]->prior = priors[i];
     }
-    node->expanded = true;
+}
+
+void MCTSEngine::applyVirtualLoss(MCTSNode* node, int count) {
+    MCTSNode* cur = node;
+    while (cur) {
+        cur->visitCount.fetch_add(count, std::memory_order_relaxed);
+        double old = cur->valueSum.load(std::memory_order_relaxed);
+        while (!cur->valueSum.compare_exchange_weak(old, old - count, std::memory_order_relaxed)) {}
+        cur = cur->parent;
+    }
+}
+
+void MCTSEngine::removeVirtualLoss(MCTSNode* node, int count) {
+    MCTSNode* cur = node;
+    while (cur) {
+        cur->visitCount.fetch_sub(count, std::memory_order_relaxed);
+        double old = cur->valueSum.load(std::memory_order_relaxed);
+        while (!cur->valueSum.compare_exchange_weak(old, old + count, std::memory_order_relaxed)) {}
+        cur = cur->parent;
+    }
 }
 
 void MCTSEngine::backpropagate(MCTSNode* node, double value) {
@@ -130,10 +153,14 @@ MCTSResult MCTSEngine::search(const Board& board, const MCTSConfig& config,
     auto deadline = startTime + std::chrono::milliseconds(timeLimitMs > 0 ? timeLimitMs : 100000);
 
     auto root = std::make_unique<MCTSNode>();
-    expand(root.get(), board);
 
-    if (root->children.empty()) {
+    // Root expansion: single eval
+    if (!expandMoves(root.get(), board)) {
         return MCTSResult{};
+    }
+    {
+        NNOutput rootOut = nn_.evaluate(board);
+        applyNNOutput(root.get(), rootOut, board);
     }
 
     if (config_.addNoise) {
@@ -143,37 +170,82 @@ MCTSResult MCTSEngine::search(const Board& board, const MCTSConfig& config,
     int simCount = 0;
     int lastReportSim = 0;
 
+    struct PendingEval {
+        MCTSNode* leaf;
+        Board board;
+        bool terminal;
+        int batchIndex;
+    };
+
     while (simCount < config_.simulations) {
         if (std::chrono::steady_clock::now() >= deadline) break;
 
-        MCTSNode* leaf = select(root.get());
+        std::vector<PendingEval> pending;
+        std::vector<Board> evalBoards;
 
-        Board leafBoard = board;
-        std::vector<MCTSNode*> path;
-        {
-            MCTSNode* cur = leaf;
-            while (cur != root.get()) {
-                path.push_back(cur);
-                cur = cur->parent;
+        int batchTarget = std::min(config_.batchSize,
+                                   config_.simulations - simCount);
+
+        for (int b = 0; b < batchTarget; ++b) {
+            MCTSNode* leaf = select(root.get());
+
+            // Reconstruct board at leaf
+            Board leafBoard = board;
+            std::vector<MCTSNode*> path;
+            {
+                MCTSNode* cur = leaf;
+                while (cur != root.get()) {
+                    path.push_back(cur);
+                    cur = cur->parent;
+                }
+                std::reverse(path.begin(), path.end());
             }
-            std::reverse(path.begin(), path.end());
-        }
-        for (MCTSNode* n : path) {
-            applyMove(leafBoard, n->move);
+            for (MCTSNode* n : path) {
+                applyMove(leafBoard, n->move);
+            }
+
+            if (leaf->expanded) {
+                // Terminal or revisit
+                double val = leaf->children.empty() ? 1.0 : -leaf->q();
+                pending.push_back({leaf, leafBoard, true, -1});
+                backpropagate(leaf, val);
+                ++simCount;
+                continue;
+            }
+
+            bool hasChildren = expandMoves(leaf, leafBoard);
+            if (!hasChildren) {
+                pending.push_back({leaf, leafBoard, true, -1});
+                backpropagate(leaf, 1.0);
+                ++simCount;
+                continue;
+            }
+
+            applyVirtualLoss(leaf, config_.virtualLoss);
+            int idx = static_cast<int>(evalBoards.size());
+            evalBoards.push_back(leafBoard);
+            pending.push_back({leaf, leafBoard, false, idx});
         }
 
-        double value;
-        if (!leaf->expanded) {
-            expand(leaf, leafBoard);
-            NNOutput out = nn_.evaluate(leafBoard);
-            value = -out.value;
-        } else {
-            value = leaf->children.empty() ? 1.0 : 0.0;
+        // Batch NN evaluation
+        if (!evalBoards.empty()) {
+            std::vector<NNOutput> outputs;
+            if (evalBoards.size() == 1) {
+                outputs.push_back(nn_.evaluate(evalBoards[0]));
+            } else {
+                outputs = nn_.evaluateBatch(evalBoards);
+            }
+
+            for (auto& p : pending) {
+                if (p.terminal) continue;
+                removeVirtualLoss(p.leaf, config_.virtualLoss);
+                applyNNOutput(p.leaf, outputs[p.batchIndex], p.board);
+                backpropagate(p.leaf, -outputs[p.batchIndex].value);
+                ++simCount;
+            }
         }
 
-        backpropagate(leaf, value);
-        ++simCount;
-
+        // Periodic info reporting
         if (callback && simCount - lastReportSim >= 100) {
             lastReportSim = simCount;
             auto now = std::chrono::steady_clock::now();
@@ -201,11 +273,9 @@ MCTSResult MCTSEngine::search(const Board& board, const MCTSConfig& config,
         }
     }
 
-    // Select best move: proportional to visit count with temperature
-    // to ensure variety, especially with low sim counts
+    // Select best move
     MCTSNode* bestChild = nullptr;
     if (simCount < 30) {
-        // Very few sims: pick proportionally to visit counts
         std::vector<double> weights;
         weights.reserve(root->children.size());
         for (auto& c : root->children) {

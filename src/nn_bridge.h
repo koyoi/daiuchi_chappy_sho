@@ -7,6 +7,10 @@
 #include <string>
 #include <vector>
 
+#ifdef HAS_ONNXRUNTIME
+#include <memory>
+#endif
+
 namespace shogi {
 
 constexpr int PolicySize = 2187; // 81 squares * 27 channels
@@ -27,6 +31,10 @@ struct NNBridgeSettings {
     std::string model = "nn_model.pt";
     std::string device = "auto";
 };
+
+#ifdef HAS_ONNXRUNTIME
+class OnnxInference;
+#endif
 
 class NNBridge {
 public:
@@ -57,6 +65,12 @@ private:
     std::string recvLine();
     std::string recvLine(int timeoutMs);
     NNOutput makeFallbackOutput() const;
+
+#ifdef HAS_ONNXRUNTIME
+    bool tryOnnx();
+    std::unique_ptr<OnnxInference> onnx_;
+    bool onnxAttempted_ = false;
+#endif
 
     NNBridgeSettings settings_;
     mutable std::mutex mutex_;

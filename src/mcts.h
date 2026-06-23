@@ -13,6 +13,7 @@
 namespace shogi {
 
 class NNBridge;
+struct NNOutput;
 
 struct MCTSNode {
     Move move{};
@@ -41,6 +42,7 @@ struct MCTSConfig {
     double dirichletAlpha = 0.15;
     double dirichletEpsilon = 0.25;
     int batchSize = 8;
+    int virtualLoss = 3;
     bool addNoise = true;
 };
 
@@ -61,10 +63,14 @@ public:
                       const InfoCallback& callback);
 
     void setSimulations(int n) { config_.simulations = n; }
+    void setBatchSize(int n) { config_.batchSize = std::max(1, n); }
 
 private:
     MCTSNode* select(MCTSNode* node) const;
-    void expand(MCTSNode* node, const Board& board);
+    bool expandMoves(MCTSNode* node, const Board& board);
+    void applyNNOutput(MCTSNode* node, const NNOutput& output, const Board& board);
+    void applyVirtualLoss(MCTSNode* node, int count);
+    void removeVirtualLoss(MCTSNode* node, int count);
     void backpropagate(MCTSNode* node, double value);
     std::vector<Move> extractPV(MCTSNode* root) const;
     void addDirichletNoise(MCTSNode* node);

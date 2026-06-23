@@ -74,6 +74,7 @@ void MCTSEngineWrapper::setNNPython(const std::string& python) { nn_.setPython(p
 void MCTSEngineWrapper::setNNScript(const std::string& script) { nn_.setScript(script); }
 void MCTSEngineWrapper::setNNModel(const std::string& model) { nn_.setModel(model); }
 void MCTSEngineWrapper::setNNDevice(const std::string& device) { nn_.setDevice(device); }
+void MCTSEngineWrapper::setBatchSize(int n) { mcts_.setBatchSize(n); }
 bool MCTSEngineWrapper::ensureNN() { return nn_.ensureProcess(); }
 const std::string& MCTSEngineWrapper::nnLastError() const { return nn_.lastError(); }
 const std::string& MCTSEngineWrapper::nnModelPath() const { return nn_.modelPath(); }

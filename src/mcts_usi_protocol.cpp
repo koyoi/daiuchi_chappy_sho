@@ -60,6 +60,8 @@ void handleSetOption(MCTSEngineWrapper& engine, const std::vector<std::string>& 
         engine.setNNModel(value);
     } else if (name == "NNDevice") {
         engine.setNNDevice(value);
+    } else if (name == "MctsBatchSize") {
+        try { engine.setBatchSize(std::stoi(value)); } catch (...) {}
     }
 }
 
@@ -129,6 +131,7 @@ void mctsUsiLoop() {
             std::cout << "option name NNScript type string default tools/nn_eval.py" << std::endl;
             std::cout << "option name NNModel type string default nn_model.pt" << std::endl;
             std::cout << "option name NNDevice type string default auto" << std::endl;
+            std::cout << "option name MctsBatchSize type spin default 8 min 1 max 64" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
             if (!engine.ensureNN()) {

@@ -52,19 +52,44 @@ else()
 endif()
 
 # --- MCTSエンジン (Transformer + MCTS) ---
-add_executable(kishi-to
+option(USE_ONNXRUNTIME "Use ONNX Runtime for direct C++ NN inference" OFF)
+
+set(MCTS_SOURCES
     src/mcts.cpp
     src/nn_bridge.cpp
     src/mcts_engine.cpp
     src/mcts_usi_protocol.cpp
     src/mcts_main.cpp
 )
+
+if(USE_ONNXRUNTIME)
+    find_library(ONNXRUNTIME_LIB onnxruntime
+        PATHS "${ONNXRUNTIME_ROOT}/lib" ENV ONNXRUNTIME_ROOT)
+    find_path(ONNXRUNTIME_INCLUDE onnxruntime_cxx_api.h
+        PATHS "${ONNXRUNTIME_ROOT}/include" ENV ONNXRUNTIME_ROOT
+        PATH_SUFFIXES onnxruntime)
+    if(ONNXRUNTIME_LIB AND ONNXRUNTIME_INCLUDE)
+        message(STATUS "ONNX Runtime found: ${ONNXRUNTIME_LIB}")
+        list(APPEND MCTS_SOURCES src/onnx_inference.cpp)
+    else()
+        message(WARNING "ONNX Runtime not found (set ONNXRUNTIME_ROOT). Building without ONNX.")
+        set(USE_ONNXRUNTIME OFF)
+    endif()
+endif()
+
+add_executable(kishi-to ${MCTS_SOURCES})
 target_link_libraries(kishi-to PRIVATE shogi_core)
 target_compile_features(kishi-to PRIVATE cxx_std_17)
 if(MSVC)
     target_compile_options(kishi-to PRIVATE /W4 /permissive- /utf-8)
 else()
     target_compile_options(kishi-to PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(USE_ONNXRUNTIME)
+    target_compile_definitions(kishi-to PRIVATE HAS_ONNXRUNTIME=1)
+    target_include_directories(kishi-to PRIVATE ${ONNXRUNTIME_INCLUDE})
+    target_link_libraries(kishi-to PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
 add_custom_command(TARGET kishi-to POST_BUILD

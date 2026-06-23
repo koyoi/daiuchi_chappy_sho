@@ -27,6 +27,7 @@ public:
     void setNNScript(const std::string& script);
     void setNNModel(const std::string& model);
     void setNNDevice(const std::string& device);
+    void setBatchSize(int n);
     bool ensureNN();
     const std::string& nnLastError() const;
     const std::string& nnModelPath() const;
