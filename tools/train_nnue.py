@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import re
 import struct
 import sys
 from concurrent.futures import ProcessPoolExecutor
@@ -92,58 +93,49 @@ CSA_TO_PIECE_TYPE = {
 }
 
 
-def extract_features_from_board(board: Board, side_black: bool) -> List[int]:
-    """Extract active NNUE feature indices from a csa_parser Board."""
-    features = []
-    for row in range(9):
-        for col in range(9):
-            sq = row * 9 + col
-            cell = board.board[row][col]
-            if cell == 0:
-                continue
-            piece_is_black = cell > 0
-            abs_piece = abs(cell)
-            pt_id = PIECE_TYPE_FROM_ID.get(abs_piece)
-            if pt_id is None:
-                continue
-            piece_type = CSA_TO_PIECE_TYPE.get(pt_id)
-            if piece_type is None:
-                continue
-            for persp_black in [True, False]:
-                fi = board_feature_index(persp_black, piece_is_black, piece_type, sq)
-                if 0 <= fi < INPUT_DIM:
-                    features.append((persp_black, fi))
+def extract_features_from_board(board: Board) -> Tuple[List[int], List[int]]:
+    """Extract active NNUE feature indices from a csa_parser Board.
 
-    hand_types_csa = ["FU", "KY", "KE", "GI", "KI", "KA", "HI"]
-    hand_types_pt = [PT_PAWN, PT_LANCE, PT_KNIGHT, PT_SILVER, PT_GOLD, PT_BISHOP, PT_ROOK]
+    Returns (black_perspective_features, white_perspective_features).
+    Board.squares is a flat 81-element array; piece encoding: positive=Black, negative=White.
+    HAND_INDEX maps piece type int (1-7) to hand array index (0-6).
+    """
+    black_feats = []
+    white_feats = []
 
-    for hand_idx_csa, pt in zip(hand_types_csa, hand_types_pt):
-        for color_black in [True, False]:
-            hand = board.hand_black if color_black else board.hand_white
-            hi = HAND_INDEX.get(hand_idx_csa, -1)
-            if hi < 0:
-                continue
+    for sq in range(BOARD_SIZE):
+        piece = board.squares[sq]
+        if piece == 0:
+            continue
+        piece_is_black = piece > 0
+        piece_type = abs(piece)  # already 1-14 matching our PT_ constants
+        for persp_black, feat_list in [(True, black_feats), (False, white_feats)]:
+            fi = board_feature_index(persp_black, piece_is_black, piece_type, sq)
+            if 0 <= fi < INPUT_DIM:
+                feat_list.append(fi)
+
+    for pt in range(1, 8):  # Pawn(1) through Rook(7)
+        hi = HAND_INDEX.get(pt)
+        if hi is None:
+            continue
+        for color_black, hand in [(True, board.black_hand), (False, board.white_hand)]:
             count = hand[hi]
             for c in range(1, count + 1):
-                for persp_black in [True, False]:
+                for persp_black, feat_list in [(True, black_feats), (False, white_feats)]:
                     fi = hand_feature_index(persp_black, color_black, pt, c)
                     if 0 <= fi < INPUT_DIM:
-                        features.append((persp_black, fi))
+                        feat_list.append(fi)
 
-    return features
-
-
-def features_to_sparse(features: List[Tuple[bool, int]]) -> Tuple[List[int], List[int]]:
-    """Split features into black-perspective and white-perspective index lists."""
-    black_feats = [fi for (is_black, fi) in features if is_black]
-    white_feats = [fi for (is_black, fi) in features if not is_black]
     return black_feats, white_feats
 
 
 def parse_game_nnue(filepath: Path, min_rate: int = 0,
                     skip_opening: int = 10,
                     sample_rate: float = 0.3) -> Optional[List[dict]]:
-    """Parse CSA file, return list of {black_feats, white_feats, side_black, result}."""
+    """Parse CSA file, return list of {black_feats, white_feats, side_black, result}.
+
+    Follows the same parsing logic as csa_parser.parse_game().
+    """
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -152,6 +144,7 @@ def parse_game_nnue(filepath: Path, min_rate: int = 0,
 
     lines = [l.rstrip("\n\r") for l in lines]
 
+    # --- Result ---
     result_line = None
     for line in lines:
         if line.startswith("'summary:"):
@@ -177,87 +170,101 @@ def parse_game_nnue(filepath: Path, min_rate: int = 0,
     if black_win is None:
         return None
 
-    rates = []
-    for line in lines:
-        if line.startswith("'rating:"):
-            try:
-                parts = line.split(":")
-                for p in parts[1:]:
-                    for token in p.split():
-                        try:
-                            rates.append(int(token))
-                        except ValueError:
-                            pass
-            except Exception:
-                pass
-    if min_rate > 0 and rates:
-        if any(r < min_rate for r in rates):
+    # --- Ratings (use 'black_rate:'/'white_rate:' format) ---
+    if min_rate > 0:
+        black_rate = 0
+        white_rate = 0
+        for line in lines:
+            if line.startswith("'black_rate:"):
+                m = re.search(r":(\d+(?:\.\d+)?)\s*$", line)
+                if m:
+                    black_rate = int(float(m.group(1)))
+            elif line.startswith("'white_rate:"):
+                m = re.search(r":(\d+(?:\.\d+)?)\s*$", line)
+                if m:
+                    white_rate = int(float(m.group(1)))
+        if black_rate < min_rate or white_rate < min_rate:
             return None
 
-    board = Board()
-    if not is_hirate(lines):
-        parsed = parse_csa_initial_board(lines)
-        if parsed is None:
-            return None
-        board = parsed
+    # --- Initial board ---
+    board_setup_lines = [l for l in lines if re.match(r"^P[1-9+\-]", l)]
+    if is_hirate(lines):
+        std_lines = [
+            "P1-KY-KE-GI-KI-OU-KI-GI-KE-KY",
+            "P2 * -HI *  *  *  *  * -KA * ",
+            "P3-FU-FU-FU-FU-FU-FU-FU-FU-FU",
+            "P4 *  *  *  *  *  *  *  *  * ",
+            "P5 *  *  *  *  *  *  *  *  * ",
+            "P6 *  *  *  *  *  *  *  *  * ",
+            "P7+FU+FU+FU+FU+FU+FU+FU+FU+FU",
+            "P8 * +KA *  *  *  *  * +HI * ",
+            "P9+KY+KE+GI+KI+OU+KI+GI+KE+KY",
+        ]
+        board = parse_csa_initial_board(std_lines)
+    else:
+        board = parse_csa_initial_board(board_setup_lines)
 
-    samples = []
-    move_num = 0
-    side_black = True
-
+    # --- Initial side ---
     for line in lines:
-        if not line or line[0] not in ('+', '-'):
-            continue
-        if line in ('%TORYO', '%CHUDAN', '%SENNICHITE', '%JISHOGI', '%KACHI', '%HIKIWAKE'):
+        if line == "+":
+            board.side = 1
+            break
+        elif line == "-":
+            board.side = -1
             break
 
-        move_num += 1
-        try:
-            side_black = line[0] == '+'
-            fr = int(line[1]) - 1, int(line[2]) - 1
-            to = int(line[3]) - 1, int(line[4]) - 1
-            piece_code = line[5:7]
+    # --- Collect move lines ---
+    move_lines = []
+    for line in lines:
+        if len(line) >= 7 and line[0] in ('+', '-') and line[1].isdigit():
+            move_lines.append(line)
 
-            if move_num > skip_opening and random.random() < sample_rate:
-                features = extract_features_from_board(board, side_black)
-                black_feats, white_feats = features_to_sparse(features)
-                result = 1.0 if black_win else -1.0
-                samples.append({
-                    "black_feats": black_feats,
-                    "white_feats": white_feats,
-                    "side_black": side_black,
-                    "result": result,
-                })
+    if len(move_lines) < 10:
+        return None
 
-            # Apply move
-            if fr == (-1, -1):
-                pi = HAND_INDEX.get(piece_code)
-                if pi is not None:
-                    hand = board.hand_black if side_black else board.hand_white
-                    if hand[pi] > 0:
-                        hand[pi] -= 1
-                    piece_id = CSA_PIECE_MAP.get(piece_code, 0)
-                    board.board[to[0]][to[1]] = piece_id if side_black else -piece_id
-            else:
-                captured = board.board[to[0]][to[1]]
-                if captured != 0:
-                    abs_cap = abs(captured)
-                    cap_type = PIECE_TYPE_FROM_ID.get(abs_cap)
-                    if cap_type:
-                        demoted = cap_type
-                        promote_map = {"TO": "FU", "NY": "KY", "NK": "KE",
-                                       "NG": "GI", "UM": "KA", "RY": "HI"}
-                        if demoted in promote_map:
-                            demoted = promote_map[demoted]
-                        hi = HAND_INDEX.get(demoted)
-                        if hi is not None:
-                            hand = board.hand_black if side_black else board.hand_white
-                            hand[hi] += 1
-                board.board[fr[0]][fr[1]] = 0
-                piece_id = CSA_PIECE_MAP.get(piece_code, 0)
-                board.board[to[0]][to[1]] = piece_id if side_black else -piece_id
-        except Exception:
+    # --- Replay game and sample positions ---
+    samples = []
+    for ply, mline in enumerate(move_lines):
+        side = 1 if mline[0] == '+' else -1
+        side_black = (side == 1)
+
+        from_file = int(mline[1])
+        from_rank = int(mline[2])
+        to_file = int(mline[3])
+        to_rank = int(mline[4])
+        piece_name = mline[5:7]
+        pt = CSA_PIECE_MAP.get(piece_name, 0)
+        if pt == 0:
             continue
+
+        is_drop = (from_file == 0 and from_rank == 0)
+        to_sq = idx(to_file, to_rank)
+
+        if is_drop:
+            from_sq = -1
+            promote = False
+            drop_piece = pt
+        else:
+            from_sq = idx(from_file, from_rank)
+            drop_piece = 0
+            current_piece = abs(board.squares[from_sq]) if from_sq >= 0 else 0
+            promote = (pt >= 9 and current_piece < 9) if current_piece > 0 else False
+
+        # Sample position BEFORE applying the move
+        if ply >= skip_opening and random.random() < sample_rate:
+            bf, wf = extract_features_from_board(board)
+            result = 1.0 if black_win else -1.0
+            samples.append({
+                "black_feats": bf,
+                "white_feats": wf,
+                "side_black": side_black,
+                "result": result,
+            })
+
+        # Apply move using Board.apply_move()
+        board.apply_move(from_sq, to_sq, is_drop,
+                         drop_piece if is_drop else pt,
+                         promote, side)
 
     return samples if samples else None
 
