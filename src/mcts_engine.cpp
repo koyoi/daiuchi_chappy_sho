@@ -1,5 +1,6 @@
 #include "mcts_engine.h"
 
+#include "mate_solver.h"
 #include "movegen.h"
 #include "position.h"
 
@@ -23,6 +24,7 @@ Move MCTSEngineWrapper::chooseMove(const Board& board, const SearchLimits& limit
 
 Move MCTSEngineWrapper::chooseMove(const Board& board, const SearchLimits& limits,
                                     const InfoCallback& infoCallback) {
+    const auto searchStart = std::chrono::steady_clock::now();
     const int moveTime = limits.moveTimeMs > 0 ? limits.moveTimeMs : maxMoveTimeMs_;
     const int clampedTime = std::clamp(moveTime, 50, 600000);
 
@@ -34,6 +36,30 @@ Move MCTSEngineWrapper::chooseMove(const Board& board, const SearchLimits& limit
             lastSearchInfo_ = info;
         }
         return Move{};
+    }
+
+    {
+        const int mateBudget = std::min(clampedTime / 10, 200);
+        MateResult mateResult = mateSolver_.searchMate(board, board.side, 31, mateBudget);
+        if (mateResult.found) {
+            SearchInfo info;
+            info.depth = mateResult.moves;
+            info.scoreCp = 30000;
+            info.nodes = mateResult.nodes;
+            info.timeMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - searchStart).count());
+            info.bestMove = mateResult.bestMove;
+            info.hasBestMove = true;
+            info.pv = mateResult.pv;
+            info.isMate = true;
+            info.mateInMoves = mateResult.moves;
+            {
+                std::lock_guard<std::mutex> lock(infoMutex_);
+                lastSearchInfo_ = info;
+            }
+            if (infoCallback) infoCallback(info);
+            return mateResult.bestMove;
+        }
     }
 
     MCTSConfig config;
@@ -78,6 +104,10 @@ void MCTSEngineWrapper::setBatchSize(int n) { mcts_.setBatchSize(n); }
 bool MCTSEngineWrapper::ensureNN() { return nn_.ensureProcess(); }
 const std::string& MCTSEngineWrapper::nnLastError() const { return nn_.lastError(); }
 const std::string& MCTSEngineWrapper::nnModelPath() const { return nn_.modelPath(); }
+
+MateResult MCTSEngineWrapper::searchMate(const Board& board, int timeLimitMs) {
+    return mateSolver_.searchMate(board, board.side, 31, timeLimitMs);
+}
 
 SearchInfo MCTSEngineWrapper::lastSearchInfo() const {
     std::lock_guard<std::mutex> lock(infoMutex_);

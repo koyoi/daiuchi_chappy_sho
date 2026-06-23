@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mate_solver.h"
 #include "mcts.h"
 #include "nn_bridge.h"
 #include "search_types.h"
@@ -17,6 +18,7 @@ public:
     Move chooseMove(const Board& board);
     Move chooseMove(const Board& board, const SearchLimits& limits);
     Move chooseMove(const Board& board, const SearchLimits& limits, const InfoCallback& infoCallback);
+    MateResult searchMate(const Board& board, int timeLimitMs = 500);
     void recordMove(const Board& before, const Move& move, bool engineMove);
     void finishGame(int engineResult, Color engineSide);
     void clearGame();
@@ -36,6 +38,7 @@ public:
 private:
     NNBridge nn_;
     MCTSEngine mcts_;
+    MateSolver mateSolver_;
     int maxMoveTimeMs_ = 3000;
     int simulations_ = 800;
     mutable SearchInfo lastSearchInfo_;

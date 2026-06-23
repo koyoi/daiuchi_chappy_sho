@@ -1,5 +1,6 @@
 #include "mcts_usi_protocol.h"
 
+#include "mate_solver.h"
 #include "mcts_engine.h"
 #include "movegen.h"
 #include "notation.h"
@@ -162,6 +163,30 @@ void mctsUsiLoop() {
         } else if (command == "position") {
             if (!setPosition(board, words)) continue;
         } else if (command == "go" || command == "stop") {
+            const bool isMateSearch = std::find(words.begin(), words.end(), "mate") != words.end();
+            if (isMateSearch) {
+                int mateMoveTime = 10000;
+                auto mateIt = std::find(words.begin(), words.end(), "mate");
+                if (std::next(mateIt) != words.end()) {
+                    const std::string& val = *std::next(mateIt);
+                    if (val != "infinite") {
+                        try { mateMoveTime = std::stoi(val); } catch (...) {}
+                        if (mateMoveTime <= 0) mateMoveTime = 10000;
+                    } else {
+                        mateMoveTime = 300000;
+                    }
+                }
+                MateResult result = engine.searchMate(board, mateMoveTime);
+                if (result.found) {
+                    std::cout << "checkmate";
+                    for (const Move& m : result.pv) {
+                        std::cout << " " << toUsi(m);
+                    }
+                    std::cout << std::endl;
+                } else {
+                    std::cout << "checkmate notimplemented" << std::endl;
+                }
+            } else {
             if (!engineSideKnown) {
                 engineSide = board.side;
                 engineSideKnown = true;
@@ -173,6 +198,7 @@ void mctsUsiLoop() {
             } else {
                 printSearchInfo(engine.lastSearchInfo());
                 std::cout << "bestmove " << toUsi(move) << std::endl;
+            }
             }
         } else if (command == "gameover") {
             engine.clearGame();

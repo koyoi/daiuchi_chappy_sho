@@ -294,8 +294,8 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
     }
 
     {
-        const int mateBudget = std::min(moveTime / 10, 200);
-        MateResult mateResult = mateSolver_.searchMate(board, rootSide, 7, mateBudget);
+        const int mateBudget = std::min(moveTime / 10, 300);
+        MateResult mateResult = mateSolver_.searchMate(board, rootSide, 31, mateBudget);
         if (mateResult.found) {
             SearchInfo info;
             info.depth = mateResult.moves;

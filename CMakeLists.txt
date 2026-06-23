@@ -59,6 +59,7 @@ option(USE_ONNXRUNTIME "Use ONNX Runtime for direct C++ NN inference" OFF)
 set(MCTS_SOURCES
     src/mcts.cpp
     src/nn_bridge.cpp
+    src/mate_solver.cpp
     src/mcts_engine.cpp
     src/mcts_usi_protocol.cpp
     src/mcts_main.cpp
