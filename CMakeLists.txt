@@ -95,6 +95,23 @@ if(USE_ONNXRUNTIME)
     target_link_libraries(kishi-to PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
+# --- NNUEエンジン (NNUE評価 + alpha-beta) ---
+add_executable(kishi-to-nnue
+    src/nnue.cpp
+    src/nnue_engine.cpp
+    src/mate_solver.cpp
+    src/opening_book.cpp
+    src/nnue_usi_protocol.cpp
+    src/nnue_main.cpp
+)
+target_link_libraries(kishi-to-nnue PRIVATE shogi_core Threads::Threads)
+target_compile_features(kishi-to-nnue PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(kishi-to-nnue PRIVATE /W4 /permissive- /utf-8)
+else()
+    target_compile_options(kishi-to-nnue PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_custom_command(TARGET kishi-to POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:kishi-to>/tools"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
