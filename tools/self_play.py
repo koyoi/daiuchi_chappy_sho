@@ -197,6 +197,8 @@ def run_match(engine_path: str, model1: Optional[str], model2: Optional[str],
 
     wins1 = 0
     wins2 = 0
+    black_wins = 0
+    white_wins = 0
     draws = 0
     match_start = time.monotonic()
 
@@ -218,37 +220,47 @@ def run_match(engine_path: str, model1: Optional[str], model2: Optional[str],
             game_elapsed = time.monotonic() - game_start
 
             if result == "black":
-                winner_label = black_label
+                winner_label = f"{black_label}(B)"
+                black_wins += 1
                 if black_label == label1:
                     wins1 += 1
                 else:
                     wins2 += 1
             elif result == "white":
-                winner_label = white_label
+                winner_label = f"{white_label}(W)"
+                white_wins += 1
                 if white_label == label1:
                     wins1 += 1
                 else:
                     wins2 += 1
             else:
-                winner_label = result  # "draw(rep)" or "draw(max)"
+                winner_label = result
                 draws += 1
 
+            decisive = black_wins + white_wins
+            b_pct = f"{100.0*black_wins/decisive:.0f}" if decisive else "-"
             tqdm.write(
                 f"  Game {game_idx+1}/{games}: "
                 f"{black_label}(B) vs {white_label}(W) -> {winner_label} "
                 f"({ply_count}moves, {game_elapsed:.0f}s) "
-                f"[{label1} {wins1}W-{wins2}L-{draws}D]",
+                f"[B:{black_wins} W:{white_wins} D:{draws} "
+                f"B%={b_pct}%]",
                 file=sys.stderr)
     finally:
         e1.quit()
         e2.quit()
 
     total = wins1 + wins2 + draws
+    decisive = black_wins + white_wins
     win_rate = wins1 / total * 100 if total > 0 else 0
+    b_pct = 100.0 * black_wins / decisive if decisive else 0
     total_elapsed = time.monotonic() - match_start
-    summary = (f"{label1} vs {label2}: "
-               f"{wins1}W-{wins2}L-{draws}D ({win_rate:.1f}%) "
-               f"in {total_elapsed:.0f}s")
+    color_stats = f"Black:{black_wins} White:{white_wins} Draw:{draws} (B%={b_pct:.1f}%)"
+    if label1 != label2:
+        model_stats = f"{label1} vs {label2}: {wins1}W-{wins2}L-{draws}D ({win_rate:.1f}%)"
+    else:
+        model_stats = f"{label1} self-play"
+    summary = f"{model_stats} | {color_stats} | {total_elapsed:.0f}s"
     tqdm.write(summary, file=sys.stderr)
 
     return {
@@ -258,6 +270,8 @@ def run_match(engine_path: str, model1: Optional[str], model2: Optional[str],
         "wins2": wins2,
         "draws": draws,
         "win_rate": win_rate,
+        "black_wins": black_wins,
+        "white_wins": white_wins,
         "summary": summary,
     }
 
