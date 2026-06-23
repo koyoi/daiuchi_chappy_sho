@@ -1,6 +1,7 @@
 #include "usi_protocol.h"
 
 #include "engine.h"
+#include "mate_solver.h"
 #include "movegen.h"
 #include "notation.h"
 #include "position.h"
@@ -141,6 +142,8 @@ void handleSetOption(LearningEngine& engine, const std::vector<std::string>& wor
                 std::cout << "info string MLP weights loaded: " << value << std::endl;
             }
         }
+    } else if (name == "Book") {
+        engine.setBookEnabled(value != "false" && value != "0");
     } else if (name == "RootPruneWidth") {
         try {
             engine.setRootPruneWidth(std::stoi(value));
@@ -202,9 +205,13 @@ void printSearchInfo(const SearchInfo& info) {
         return;
     }
     const std::uint64_t nps = info.timeMs > 0 ? info.nodes * 1000ull / static_cast<std::uint64_t>(info.timeMs) : info.nodes;
-    std::cout << "info depth " << info.depth
-              << " score cp " << info.scoreCp
-              << " nodes " << info.nodes
+    std::cout << "info depth " << info.depth;
+    if (info.isMate) {
+        std::cout << " score mate " << info.mateInMoves;
+    } else {
+        std::cout << " score cp " << info.scoreCp;
+    }
+    std::cout << " nodes " << info.nodes
               << " nps " << nps
               << " time " << info.timeMs
               << " pv";
@@ -245,17 +252,21 @@ void usiLoop() {
             std::cout << "option name SearchDepth type spin default 0 min 0 max 128" << std::endl;
             std::cout << "option name MaxMoveTimeMs type spin default 1000 min 50 max 600000" << std::endl;
             std::cout << "option name Threads type spin default " << engine.threadCount() << " min 1 max 256" << std::endl;
-            std::cout << "option name HeavyEvaluation type check default false" << std::endl;
-            std::cout << "option name OpeningSafety type check default true" << std::endl;
-            std::cout << "option name RecordOnly type check default false" << std::endl;
             std::cout << "option name WeightsFile type string default random-shogi.weights" << std::endl;
-            std::cout << "option name TrainingDataFile type string default mlp_training.tsv" << std::endl;
             std::cout << "option name MlpWeightsFile type string default " << std::endl;
-            std::cout << "option name RootPruneWidth type spin default 15 min 0 max 256" << std::endl;
+            std::cout << "option name Book type check default true" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
             if (!engine.loadWeights()) {
                 std::cout << "info string WARNING: linear weights not found: " << engine.weightsPath() << " (using defaults)" << std::endl;
+            }
+            if (engine.loadBook()) {
+                std::cout << "info string Opening book loaded" << std::endl;
+            }
+            if (engine.loadMlpWeights("mlp.weights")) {
+                std::cout << "info string MLP evaluation enabled (mlp.weights)" << std::endl;
+            } else {
+                std::cout << "info string MLP weights not found, using linear evaluation" << std::endl;
             }
             std::cout << "readyok" << std::endl;
         } else if (command == "setoption") {
@@ -267,22 +278,49 @@ void usiLoop() {
             engineSideKnown = false;
         } else if (command == "position") {
             syncPositionAndLearning(board, words, engine, engineSideKnown, engineSide, recordedMoves);
-        } else if (command == "go" || command == "stop") {
-            if (!engineSideKnown) {
-                engineSide = board.side;
-                engineSideKnown = true;
-            }
-            const Move move = engine.chooseMove(board, parseSearchLimits(words, board.side), [](const SearchInfo& info) {
-                printSearchInfo(info);
-            });
-            if (move.to < 0) {
-                std::cout << "bestmove resign" << std::endl;
+        } else if (command == "go") {
+            const bool isMateSearch = std::find(words.begin(), words.end(), "mate") != words.end();
+            if (isMateSearch) {
+                int mateMoveTime = 10000;
+                auto mateIt = std::find(words.begin(), words.end(), "mate");
+                if (std::next(mateIt) != words.end()) {
+                    const std::string& val = *std::next(mateIt);
+                    if (val != "infinite") {
+                        try { mateMoveTime = std::stoi(val); } catch (...) {}
+                        if (mateMoveTime <= 0) mateMoveTime = 10000;
+                    } else {
+                        mateMoveTime = 300000;
+                    }
+                }
+                MateResult result = engine.searchMate(board, mateMoveTime);
+                if (result.found) {
+                    std::cout << "checkmate";
+                    for (const Move& m : result.pv) {
+                        std::cout << " " << toUsi(m);
+                    }
+                    std::cout << std::endl;
+                } else {
+                    std::cout << "checkmate notimplemented" << std::endl;
+                }
             } else {
-                printSearchInfo(engine);
-                engine.recordMove(board, move, true);
-                recordedMoves.push_back(toUsi(move));
-                std::cout << "bestmove " << toUsi(move) << std::endl;
+                if (!engineSideKnown) {
+                    engineSide = board.side;
+                    engineSideKnown = true;
+                }
+                const Move move = engine.chooseMove(board, parseSearchLimits(words, board.side), [](const SearchInfo& info) {
+                    printSearchInfo(info);
+                });
+                if (move.to < 0) {
+                    std::cout << "bestmove resign" << std::endl;
+                } else {
+                    printSearchInfo(engine);
+                    engine.recordMove(board, move, true);
+                    recordedMoves.push_back(toUsi(move));
+                    std::cout << "bestmove " << toUsi(move) << std::endl;
+                }
             }
+        } else if (command == "stop") {
+            // Search is synchronous, so stop is a no-op.
         } else if (command == "gameover") {
             if (engineSideKnown) {
                 engine.finishGame(parseGameoverResult(words), engineSide);

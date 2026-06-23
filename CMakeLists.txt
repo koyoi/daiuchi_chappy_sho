@@ -32,12 +32,14 @@ else()
     target_compile_options(shogi_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-# --- 従来エンジン (alpha-beta + 44特徴量 + オンライン学習) ---
+# --- 従来エンジン (alpha-beta + 98特徴量 + オンライン学習) ---
 add_executable(kishi-to-classic
     src/engine.cpp
     src/evaluation.cpp
     src/learning.cpp
     src/kifu_learner.cpp
+    src/mate_solver.cpp
+    src/opening_book.cpp
     src/usi_protocol.cpp
     src/csa_protocol.cpp
     src/main.cpp

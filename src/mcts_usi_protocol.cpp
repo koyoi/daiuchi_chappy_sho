@@ -52,11 +52,15 @@ void handleSetOption(MCTSEngineWrapper& engine, const std::vector<std::string>& 
         try { engine.setMaxMoveTimeMs(std::stoi(value)); } catch (...) {}
     } else if (name == "MctsSimulations") {
         try { engine.setSimulations(std::stoi(value)); } catch (...) {}
-    } else if (name == "NNPython") {
+    }
+#ifndef HAS_ONNXRUNTIME
+    else if (name == "NNPython") {
         engine.setNNPython(value);
     } else if (name == "NNScript") {
         engine.setNNScript(value);
-    } else if (name == "NNModel") {
+    }
+#endif
+    else if (name == "NNModel") {
         engine.setNNModel(value);
     } else if (name == "NNDevice") {
         engine.setNNDevice(value);
@@ -123,6 +127,7 @@ void mctsUsiLoop() {
             std::cout << "id author kishi_to" << std::endl;
             std::cout << "option name MaxMoveTimeMs type spin default 3000 min 50 max 600000" << std::endl;
             std::cout << "option name MctsSimulations type spin default 800 min 1 max 100000" << std::endl;
+#ifndef HAS_ONNXRUNTIME
 #ifdef _WIN32
             std::cout << "option name NNPython type string default ..\\..\\.venv\\Scripts\\python.exe" << std::endl;
 #else
@@ -130,6 +135,9 @@ void mctsUsiLoop() {
 #endif
             std::cout << "option name NNScript type string default tools/nn_eval.py" << std::endl;
             std::cout << "option name NNModel type string default nn_model.pt" << std::endl;
+#else
+            std::cout << "option name NNModel type string default nn_model.onnx" << std::endl;
+#endif
             std::cout << "option name NNDevice type string default auto" << std::endl;
             std::cout << "option name MctsBatchSize type spin default 8 min 1 max 64" << std::endl;
             std::cout << "usiok" << std::endl;

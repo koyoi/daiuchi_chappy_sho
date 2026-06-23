@@ -50,6 +50,7 @@ def main():
         model,
         (board_tokens, hand_tokens, side_token, own_atk, opp_atk),
         args.output,
+        dynamo=False,
         opset_version=args.opset,
         input_names=["board_tokens", "hand_tokens", "side_token", "own_atk", "opp_atk"],
         output_names=["value", "policy_logits"],

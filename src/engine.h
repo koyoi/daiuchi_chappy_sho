@@ -2,6 +2,8 @@
 
 #include "evaluation.h"
 #include "learning.h"
+#include "mate_solver.h"
+#include "opening_book.h"
 #include "search_types.h"
 #include "shogi_types.h"
 
@@ -41,7 +43,10 @@ public:
     bool loadMlpWeights(const std::string& path);
     const std::string& weightsPath() const;
     void setRootPruneWidth(int width);
+    void setBookEnabled(bool enabled);
+    bool loadBook(const std::string& path = "book.txt");
     SearchInfo lastSearchInfo() const;
+    MateResult searchMate(const Board& board, int timeLimitMs = 500);
 
 private:
     int search(Board& board, int depth, int alpha, int beta, Color rootSide) const;
@@ -81,6 +86,9 @@ private:
 
     Evaluator evaluator_;
     OnlineLearner learner_;
+    MateSolver mateSolver_;
+    OpeningBook book_;
+    bool bookEnabled_ = true;
     mutable std::vector<TranspositionEntry> transposition_;
     mutable std::array<std::mutex, LockCount> transpositionMutex_;
     mutable std::uint8_t ttGeneration_{0};

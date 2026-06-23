@@ -1,6 +1,7 @@
 #include "engine.h"
 
 #include "movegen.h"
+#include "notation.h"
 #include "position.h"
 
 #include <algorithm>
@@ -263,6 +264,55 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
     }
 
     const Color rootSide = board.side;
+
+    if (bookEnabled_ && !book_.empty() && board.moveNumber <= 8) {
+        const std::string bookUsi = book_.selectMove(board.hash, rng_);
+        if (!bookUsi.empty()) {
+            Move bookMove = parseUsiMove(board, bookUsi);
+            bool isLegal = false;
+            for (const Move& m : legal) {
+                if (sameMove(m, bookMove)) {
+                    bookMove = m;
+                    isLegal = true;
+                    break;
+                }
+            }
+            if (isLegal) {
+                SearchInfo info;
+                info.depth = 0;
+                info.scoreCp = 0;
+                info.nodes = 0;
+                info.timeMs = 0;
+                info.bestMove = bookMove;
+                info.hasBestMove = true;
+                info.pv.push_back(bookMove);
+                setLastSearchInfo(info);
+                if (infoCallback) infoCallback(info);
+                return bookMove;
+            }
+        }
+    }
+
+    {
+        const int mateBudget = std::min(moveTime / 10, 200);
+        MateResult mateResult = mateSolver_.searchMate(board, rootSide, 7, mateBudget);
+        if (mateResult.found) {
+            SearchInfo info;
+            info.depth = mateResult.moves;
+            info.scoreCp = MateScore;
+            info.nodes = mateResult.nodes;
+            info.timeMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - searchStart).count());
+            info.bestMove = mateResult.bestMove;
+            info.hasBestMove = true;
+            info.pv = mateResult.pv;
+            info.isMate = true;
+            info.mateInMoves = mateResult.moves;
+            setLastSearchInfo(info);
+            if (infoCallback) infoCallback(info);
+            return mateResult.bestMove;
+        }
+    }
+
     orderMoves(board, legal, rootSide);
 
     std::vector<int> openingPenalties(legal.size(), 0);
@@ -315,6 +365,12 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
             applyMove(pvBoard, bestMoves.front());
             auto pvTail = extractPV(pvBoard, rootSide, completedDepth);
             info.pv.insert(info.pv.end(), pvTail.begin(), pvTail.end());
+            if (std::abs(depthBestScore) >= MateScore) {
+                info.isMate = true;
+                const int distance = std::abs(depthBestScore) - MateScore;
+                info.mateInMoves = (distance + 1) / 2;
+                if (depthBestScore < 0) info.mateInMoves = -info.mateInMoves;
+            }
             setLastSearchInfo(info);
             if (infoCallback) {
                 infoCallback(info);
@@ -442,6 +498,14 @@ bool LearningEngine::loadMlpWeights(const std::string& path) {
 
 void LearningEngine::setRootPruneWidth(int width) {
     rootPruneWidth_ = std::max(0, width);
+}
+
+void LearningEngine::setBookEnabled(bool enabled) {
+    bookEnabled_ = enabled;
+}
+
+bool LearningEngine::loadBook(const std::string& path) {
+    return book_.load(path);
 }
 
 SearchInfo LearningEngine::lastSearchInfo() const {
@@ -855,6 +919,10 @@ std::uint64_t LearningEngine::boardHash(const Board& board, Color rootSide) cons
 void LearningEngine::setLastSearchInfo(const SearchInfo& info) const {
     std::lock_guard<std::mutex> lock(lastSearchInfoMutex_);
     lastSearchInfo_ = info;
+}
+
+MateResult LearningEngine::searchMate(const Board& board, int timeLimitMs) {
+    return mateSolver_.searchMate(board, board.side, 31, timeLimitMs);
 }
 
 std::vector<Move> LearningEngine::extractPV(Board board, Color rootSide, int maxDepth) const {

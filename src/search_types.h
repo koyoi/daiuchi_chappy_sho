@@ -20,6 +20,8 @@ struct SearchInfo {
     Move bestMove{};
     bool hasBestMove = false;
     std::vector<Move> pv;
+    bool isMate = false;
+    int mateInMoves = 0;
 };
 
 using InfoCallback = std::function<void(const SearchInfo&)>;

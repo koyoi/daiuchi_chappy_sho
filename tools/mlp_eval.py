@@ -137,7 +137,8 @@ def train(args) -> int:
             epoch_loss += loss.item()
             n_batches += 1
             preds = (logits > 0).float()
-            correct += (preds == batch_y).sum().item()
+            targets_binary = (batch_y > 0.5).float()
+            correct += (preds == targets_binary).sum().item()
             total += batch_y.shape[0]
             if (batch_i + 1) % 100 == 0 or batch_i + 1 == num_batches:
                 elapsed = time.time() - t0

@@ -36,7 +36,8 @@ bool OnnxInference::loadModel(const std::string& modelPath, const std::string& d
             }
         }
 
-        impl_->session = std::make_unique<Ort::Session>(impl_->env, modelPath.c_str(), opts);
+        std::wstring wpath(modelPath.begin(), modelPath.end());
+        impl_->session = std::make_unique<Ort::Session>(impl_->env, wpath.c_str(), opts);
         impl_->loaded = true;
         lastError_.clear();
         return true;

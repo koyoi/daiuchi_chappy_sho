@@ -99,6 +99,8 @@ const Bitboard& stepAttacks(PieceType type, int square, Color color) {
     return color == Black ? BlackStepAttacks[type][square] : WhiteStepAttacks[type][square];
 }
 
+} // namespace (anonymous)
+
 Bitboard attackersOf(const Board& board, int square, Color byColor) {
     initAttackTables();
     const int ci = byColor == Black ? 0 : 1;
@@ -138,8 +140,6 @@ Bitboard attackersOf(const Board& board, int square, Color byColor) {
 
     return attackers;
 }
-
-} // namespace (anonymous)
 
 Bitboard FileMask[10];
 

@@ -28,7 +28,11 @@ struct NNBridgeSettings {
     std::string python = "python";
 #endif
     std::string script = "tools/nn_eval.py";
+#ifdef HAS_ONNXRUNTIME
+    std::string model = "nn_model.onnx";
+#else
     std::string model = "nn_model.pt";
+#endif
     std::string device = "auto";
 };
 
