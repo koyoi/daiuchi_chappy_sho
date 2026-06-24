@@ -3,10 +3,12 @@
 #include "mate_solver.h"
 #include "mcts.h"
 #include "nn_bridge.h"
+#include "opening_book.h"
 #include "search_types.h"
 #include "shogi_types.h"
 
 #include <mutex>
+#include <random>
 #include <string>
 
 namespace shogi {
@@ -30,7 +32,11 @@ public:
     void setNNModel(const std::string& model);
     void setNNDevice(const std::string& device);
     void setBatchSize(int n);
+    void setBookEnabled(bool enabled) { bookEnabled_ = enabled; }
+    void setWarnOnNoModel(bool enabled) { warnOnNoModel_ = enabled; }
+    bool loadBook(const std::string& path = "book.txt");
     bool ensureNN();
+    bool nnReady() const { return nn_.isReady(); }
     const std::string& nnLastError() const;
     const std::string& nnModelPath() const;
     SearchInfo lastSearchInfo() const;
@@ -39,8 +45,12 @@ private:
     NNBridge nn_;
     MCTSEngine mcts_;
     MateSolver mateSolver_;
+    OpeningBook book_;
+    bool bookEnabled_ = true;
+    bool warnOnNoModel_ = true;
     int maxMoveTimeMs_ = 3000;
     int simulations_ = 800;
+    std::mt19937 rng_{std::random_device{}()};
     mutable SearchInfo lastSearchInfo_;
     mutable std::mutex infoMutex_;
 };

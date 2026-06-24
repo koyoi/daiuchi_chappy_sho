@@ -137,13 +137,20 @@ void handleSetOption(LearningEngine& engine, const std::vector<std::string>& wor
     } else if (name == "MlpWeightsFile") {
         if (!value.empty()) {
             if (!engine.loadMlpWeights(value)) {
-                std::cout << "info string ERROR: failed to load MLP weights: " << value << std::endl;
+                if (!fileExists(value))
+                    std::cout << "info string ERROR: " << value << " not found" << std::endl;
+                else
+                    std::cout << "info string ERROR: " << value << " format error (dimension mismatch?)" << std::endl;
             } else {
                 std::cout << "info string MLP weights loaded: " << value << std::endl;
             }
         }
+    } else if (name == "UseMLP") {
+        engine.setUseMlp(value != "false" && value != "0");
     } else if (name == "Book") {
         engine.setBookEnabled(value != "false" && value != "0");
+    } else if (name == "WarnOnNoWeights") {
+        engine.setWarnOnNoWeights(value != "false" && value != "0");
     } else if (name == "RootPruneWidth") {
         try {
             engine.setRootPruneWidth(std::stoi(value));
@@ -252,13 +259,18 @@ void usiLoop() {
             std::cout << "option name SearchDepth type spin default 0 min 0 max 128" << std::endl;
             std::cout << "option name MaxMoveTimeMs type spin default 1000 min 50 max 600000" << std::endl;
             std::cout << "option name Threads type spin default " << engine.threadCount() << " min 1 max 256" << std::endl;
-            std::cout << "option name WeightsFile type string default random-shogi.weights" << std::endl;
+            std::cout << "option name WeightsFile type string default linear.weights" << std::endl;
             std::cout << "option name MlpWeightsFile type string default " << std::endl;
+            std::cout << "option name UseMLP type check default true" << std::endl;
             std::cout << "option name Book type check default true" << std::endl;
+            std::cout << "option name WarnOnNoWeights type check default true" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
             if (!engine.loadWeights()) {
-                std::cout << "info string WARNING: linear weights not found: " << engine.weightsPath() << " (using defaults)" << std::endl;
+                if (!fileExists(engine.weightsPath()))
+                    std::cout << "info string WARNING: " << engine.weightsPath() << " not found (using defaults)" << std::endl;
+                else
+                    std::cout << "info string ERROR: " << engine.weightsPath() << " format error (using defaults)" << std::endl;
             }
             if (engine.loadBook()) {
                 std::cout << "info string Opening book loaded" << std::endl;
@@ -266,7 +278,10 @@ void usiLoop() {
             if (engine.loadMlpWeights("mlp.weights")) {
                 std::cout << "info string MLP evaluation enabled (mlp.weights)" << std::endl;
             } else {
-                std::cout << "info string MLP weights not found, using linear evaluation" << std::endl;
+                if (fileExists("mlp.weights"))
+                    std::cout << "info string ERROR: mlp.weights format error, using linear evaluation" << std::endl;
+                else
+                    std::cout << "info string mlp.weights not found, using linear evaluation" << std::endl;
             }
             std::cout << "readyok" << std::endl;
         } else if (command == "setoption") {

@@ -43,7 +43,9 @@ def main():
     parser.add_argument("--engine", required=True,
                         help="kishi-to-classic executable (for feature extraction)")
     parser.add_argument("--model", default="mlp_model.pt",
-                        help="Output model path (default: mlp_model.pt)")
+                        help="PyTorch model path (default: mlp_model.pt)")
+    parser.add_argument("--output", default="mlp.weights",
+                        help="Engine weights output (default: mlp.weights)")
     parser.add_argument("--min-rate", type=int, default=1500,
                         help="Minimum player rating (default: 1500)")
     parser.add_argument("--max-games", type=int, default=0,
@@ -152,12 +154,12 @@ def main():
         return 1
 
     # Step 4: Export to text weights for C++ engine
-    print("Step 4: Exporting mlp.weights...", file=sys.stderr)
-    mlp_weights = str(Path(args.model).with_suffix(".weights"))
+    mlp_weights = args.output
+    print(f"Step 4: Exporting {mlp_weights}...", file=sys.stderr)
     export_cmd = [
         sys.executable, str(tools_dir / "export_mlp.py"),
         "--model", str(Path(args.model).resolve()),
-        "--output", mlp_weights,
+        "--output", str(Path(mlp_weights).resolve()),
     ]
     result = subprocess.run(export_cmd, stderr=sys.stderr)
     if result.returncode != 0:

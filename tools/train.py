@@ -187,11 +187,22 @@ def samples_to_tensors(samples: List[dict], torch_mod, device,
         torch_mod.set_num_threads(tensor_threads)
 
     n = len(samples)
-    encoded_rows = [s["encoded"] for s in tqdm(samples, desc="Converting to tensors",
-                                                unit="pos", file=sys.stderr, miniters=1,
-                                                dynamic_ncols=True)]
-    encoded_t = torch_mod.tensor(encoded_rows, dtype=torch_mod.long)
+    print(f"  Extracting fields from {n:,} samples...", end="", file=sys.stderr, flush=True)
+    t0 = time.time()
+    encoded_rows = [s["encoded"] for s in samples]
+    values = [s["value"] for s in samples]
+    policies = [s["move_index"] for s in samples]
+    print(f" {time.time() - t0:.1f}s", file=sys.stderr)
 
+    print(f"  Building encoded tensor ({n:,} x {len(encoded_rows[0])})...",
+          end="", file=sys.stderr, flush=True)
+    t0 = time.time()
+    encoded_t = torch_mod.tensor(encoded_rows, dtype=torch_mod.long)
+    del encoded_rows
+    print(f" {time.time() - t0:.1f}s", file=sys.stderr)
+
+    print("  Slicing board/hand/side/attack tensors...", end="", file=sys.stderr, flush=True)
+    t0 = time.time()
     board_t = encoded_t[:, :BOARD_SQUARES].clamp_(0, VOCAB_SIZE - 1)
     hand_start = BOARD_SQUARES
     hand_end = BOARD_SQUARES + 2 * HAND_TYPES
@@ -209,19 +220,146 @@ def samples_to_tensors(samples: List[dict], torch_mod, device,
     else:
         own_atk_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
         opp_atk_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
+    del encoded_t
+    print(f" {time.time() - t0:.1f}s", file=sys.stderr)
 
-    value_t = torch_mod.tensor([s["value"] for s in samples], dtype=torch_mod.float32)
-    policy_t = torch_mod.tensor([s["move_index"] for s in samples], dtype=torch_mod.long)
+    print("  Building value/policy tensors...", end="", file=sys.stderr, flush=True)
+    t0 = time.time()
+    value_t = torch_mod.tensor(values, dtype=torch_mod.float32)
+    policy_t = torch_mod.tensor(policies, dtype=torch_mod.long)
+    del values, policies
+    print(f" {time.time() - t0:.1f}s", file=sys.stderr)
+
+    if device.type != "cpu":
+        print(f"  Transferring to {device}...", end="", file=sys.stderr, flush=True)
+        t0 = time.time()
+        board_t, hand_t, side_t = board_t.to(device), hand_t.to(device), side_t.to(device)
+        own_atk_t, opp_atk_t = own_atk_t.to(device), opp_atk_t.to(device)
+        value_t, policy_t = value_t.to(device), policy_t.to(device)
+        print(f" {time.time() - t0:.1f}s", file=sys.stderr)
+        return (board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t)
 
     return (board_t.to(device), hand_t.to(device), side_t.to(device),
             own_atk_t.to(device), opp_atk_t.to(device),
             value_t.to(device), policy_t.to(device))
 
 
+def _parse_file_no_sample(filepath: str, min_rate: int):
+    """Worker for parallel parsing without position sampling."""
+    return parse_game(Path(filepath), min_rate=min_rate)
+
+
+def load_games_grouped(kifu_dir: Path, min_rate: int, max_games: int,
+                       parse_workers: int = 0):
+    """Load ALL positions from games, preserving game boundaries for eval_drop.
+
+    Returns (all_samples, game_slices) where game_slices is a list of
+    (start_idx, end_idx) tuples with positions in ply order per game.
+    """
+    csa_files = sorted(kifu_dir.rglob("*.csa"))
+    print(f"Found {len(csa_files)} CSA files", file=sys.stderr)
+    if max_games > 0:
+        csa_files = csa_files[:max_games]
+
+    all_samples: List[dict] = []
+    game_slices: List[tuple] = []
+    games_ok = 0
+    skipped = 0
+
+    worker_count = parse_workers if parse_workers > 0 else max(1, os.cpu_count() or 1)
+    if worker_count <= 1:
+        for filepath in tqdm(csa_files, desc="Parsing kifu (grouped)", unit="file",
+                             file=sys.stderr, miniters=1, dynamic_ncols=True):
+            samples = parse_game(filepath, min_rate=min_rate)
+            if samples is None:
+                skipped += 1
+                continue
+            start = len(all_samples)
+            all_samples.extend(samples)
+            game_slices.append((start, len(all_samples)))
+            games_ok += 1
+    else:
+        print(f"Parsing workers: {worker_count}", file=sys.stderr)
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            results_iter = executor.map(
+                _parse_file_no_sample,
+                [str(p) for p in csa_files],
+                repeat(min_rate),
+                chunksize=8,
+            )
+            for samples in tqdm(results_iter, total=len(csa_files),
+                                desc="Parsing kifu (grouped)", unit="file",
+                                file=sys.stderr, miniters=1, dynamic_ncols=True):
+                if samples is None:
+                    skipped += 1
+                    continue
+                start = len(all_samples)
+                all_samples.extend(samples)
+                game_slices.append((start, len(all_samples)))
+                games_ok += 1
+
+    print(f"Loaded {games_ok} games, {len(all_samples)} positions "
+          f"(skipped {skipped})", file=sys.stderr)
+    return all_samples, game_slices
+
+
+def evaluate_positions(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t,
+                       torch_mod, eval_batch=8192):
+    """Batch inference on all positions, returns value predictions on CPU."""
+    model.eval()
+    n = board_t.shape[0]
+    evals = torch_mod.zeros(n)
+    total = (n + eval_batch - 1) // eval_batch
+    with torch_mod.no_grad():
+        for start in tqdm(range(0, n, eval_batch), desc="  Evaluating",
+                          total=total, file=sys.stderr, dynamic_ncols=True):
+            end = min(start + eval_batch, n)
+            v, _ = model(board_t[start:end], hand_t[start:end], side_t[start:end],
+                         own_atk_t[start:end], opp_atk_t[start:end])
+            evals[start:end] = v.cpu()
+    return evals
+
+
+def compute_bootstrap_labels(evals, game_result_t, game_slices, torch_mod,
+                              device, blend=0.5, drop_margin=0.8):
+    """Compute improved value labels and policy weights from eval_drop.
+
+    eval_drop[i] = evals[i] + evals[i+1] for consecutive positions in same game.
+    Positive eval_drop = the mover made the position worse (blunder).
+
+    Returns (new_value_t, policy_weight_t) on device.
+    """
+    n = len(evals)
+
+    eval_drop = torch_mod.zeros(n)
+    if n > 1:
+        eval_drop[:-1] = evals[:-1] + evals[1:]
+    for _, end in game_slices:
+        if end > 0:
+            eval_drop[end - 1] = 0.0
+
+    new_value = blend * game_result_t.cpu() + (1.0 - blend) * evals
+    new_value = new_value.clamp(-1.0, 1.0)
+
+    policy_weight = torch_mod.clamp(
+        1.0 - torch_mod.relu(eval_drop) / drop_margin, min=0.05)
+
+    blunders = int((eval_drop > 0.5).sum().item())
+    good_moves = int((eval_drop < -0.3).sum().item())
+    print(f"  eval_drop: mean={eval_drop.mean():.4f} std={eval_drop.std():.4f} "
+          f"blunders(>0.5)={blunders:,} good(<-0.3)={good_moves:,}",
+          file=sys.stderr)
+    print(f"  policy_weight: mean={policy_weight.mean():.3f} "
+          f"[{policy_weight.min():.3f}, {policy_weight.max():.3f}]",
+          file=sys.stderr)
+
+    return new_value.to(device), policy_weight.to(device)
+
+
 def train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t,
                 torch_mod, nn, device, epochs: int, batch_size: int, lr: float,
                 resumed: bool = False, loser_policy_weight: float = 0.1,
-                round_number: int = 1):
+                round_number: int = 1, policy_weight_t=None):
     """Train the model on the given data."""
     model.train()
     round_decay = 0.95 ** (round_number - 1) if resumed else 1.0
@@ -245,22 +383,25 @@ def train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, p
     policy_loss_fn = nn.CrossEntropyLoss(reduction='none')
     avg_v, avg_p = 1.0, 8.0
 
-    # value_t: +1.0 = moving side won, -1.0 = moving side lost
-    policy_weight_t = torch_mod.where(
-        value_t > 0,
-        torch_mod.ones_like(value_t),
-        torch_mod.full_like(value_t, loser_policy_weight),
-    )
-    n_winner = int((value_t > 0).sum().item())
-    n_loser = n - n_winner
+    if policy_weight_t is None:
+        policy_weight_t = torch_mod.where(
+            value_t > 0,
+            torch_mod.ones_like(value_t),
+            torch_mod.full_like(value_t, loser_policy_weight),
+        )
+        pw_desc = f"loser_pw={loser_policy_weight}"
+    else:
+        pw_desc = f"bootstrap pw_mean={policy_weight_t.mean():.3f}"
+    n_positive = int((value_t > 0).sum().item())
+    n_negative = n - n_positive
 
     init_lr = max_lr / 10
     min_lr = init_lr / 100
     mode = "fine-tune" if resumed else "fresh"
-    print(f"Training ({mode} R{round_number}): {n} samples ({n_winner} winner, {n_loser} loser), "
+    print(f"Training ({mode} R{round_number}): {n} samples ({n_positive}+/{n_negative}-), "
           f"{epochs} epochs, batch={batch_size}, "
           f"lr={init_lr:.2e}→{max_lr:.2e}→{min_lr:.2e}, "
-          f"loser_pw={loser_policy_weight}",
+          f"{pw_desc}",
           file=sys.stderr)
 
     for epoch in range(epochs):
@@ -313,6 +454,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train Transformer from CSA kifu")
     parser.add_argument("--kifu", required=True, help="Root directory of CSA kifu files")
     parser.add_argument("--model", default="nn_model.pt", help="Model save path")
+    parser.add_argument("--output", default="nn_model.onnx",
+                        help="ONNX output path (default: nn_model.onnx)")
     parser.add_argument("--device", default="auto", help="auto|cuda|cpu")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=1024)
@@ -335,29 +478,42 @@ def main():
                         help="Parallel workers for kifu parsing (0=auto)")
     parser.add_argument("--tensor-threads", type=int, default=0,
                         help="CPU threads used during tensor conversion (0=default)")
+    parser.add_argument("--bootstrap-rounds", type=int, default=0,
+                        help="Self-evaluation bootstrap rounds (0=disabled)")
+    parser.add_argument("--bootstrap-blend", type=float, default=0.5,
+                        help="Blend: 0=model eval only, 1=game result only (default: 0.5)")
+    parser.add_argument("--drop-margin", type=float, default=0.8,
+                        help="eval_drop at which policy weight reaches min (default: 0.8)")
     args = parser.parse_args()
 
     torch_mod, nn = import_torch()
     device = pick_device(torch_mod, args.device)
     print(f"Device: {device}", file=sys.stderr)
 
-    # Load CSA kifu directly
-    samples = load_games(
-        Path(args.kifu), args.min_rate, args.max_games,
-        args.sample_rate, args.opening_n, args.endgame_n,
-        args.parse_workers,
-    )
+    bootstrap = args.bootstrap_rounds > 0
+
+    # Load CSA kifu
+    if bootstrap:
+        samples, game_slices = load_games_grouped(
+            Path(args.kifu), args.min_rate, args.max_games, args.parse_workers)
+    else:
+        samples = load_games(
+            Path(args.kifu), args.min_rate, args.max_games,
+            args.sample_rate, args.opening_n, args.endgame_n,
+            args.parse_workers,
+        )
+        game_slices = None
     if not samples:
         print("No samples loaded. Check kifu path and filters.", file=sys.stderr)
         return 1
 
-    # Shuffle
-    random.shuffle(samples)
+    if not bootstrap:
+        random.shuffle(samples)
 
     # Convert to tensors
     board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t = samples_to_tensors(
         samples, torch_mod, device, args.tensor_threads)
-    del samples  # free memory
+    del samples
 
     # Build/load model
     model_path = Path(args.model)
@@ -377,11 +533,40 @@ def main():
 
     effective_lr = args.lr * 0.2 if resumed else args.lr
 
-    # Train
-    final_vloss, final_ploss = train_model(
-        model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t,
-        torch_mod, nn, device, args.epochs, args.batch_size, effective_lr,
-        resumed=resumed, round_number=args.round)
+    if bootstrap:
+        game_result_t = value_t.clone()
+        total_rounds = 1 + args.bootstrap_rounds
+
+        for round_num in range(1, total_rounds + 1):
+            is_bootstrap_round = round_num > 1
+
+            if is_bootstrap_round:
+                print(f"\n--- Bootstrap round {round_num - 1}/{args.bootstrap_rounds}: "
+                      f"evaluating all positions ---", file=sys.stderr)
+                evals = evaluate_positions(model, board_t, hand_t, side_t,
+                                           own_atk_t, opp_atk_t, torch_mod)
+                value_t, pw_t = compute_bootstrap_labels(
+                    evals, game_result_t, game_slices, torch_mod, device,
+                    blend=args.bootstrap_blend, drop_margin=args.drop_margin)
+                del evals
+            else:
+                pw_t = None
+
+            print(f"\n=== Round {round_num}/{total_rounds} "
+                  f"{'(bootstrap)' if is_bootstrap_round else '(baseline)'} ===",
+                  file=sys.stderr)
+            final_vloss, final_ploss = train_model(
+                model, board_t, hand_t, side_t, own_atk_t, opp_atk_t,
+                value_t, policy_t, torch_mod, nn, device,
+                args.epochs, args.batch_size, effective_lr,
+                resumed=is_bootstrap_round, round_number=round_num,
+                policy_weight_t=pw_t)
+    else:
+        # Train (original behavior)
+        final_vloss, final_ploss = train_model(
+            model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t,
+            torch_mod, nn, device, args.epochs, args.batch_size, effective_lr,
+            resumed=resumed, round_number=args.round)
 
     # Summary to stdout (parsed by train_loop.py)
     print(f"value_loss={final_vloss:.4f} policy_loss={final_ploss:.4f}")
@@ -395,6 +580,41 @@ def main():
     # Print model stats
     params = sum(p.numel() for p in save_model.parameters())
     print(f"Model parameters: {params:,}", file=sys.stderr)
+
+    # Export to ONNX
+    onnx_path = args.output
+    print(f"Exporting ONNX to {onnx_path}...", file=sys.stderr)
+    save_model = save_model.cpu()
+    save_model.eval()
+    batch_size = 1
+    board_dummy = torch_mod.zeros(batch_size, 81, dtype=torch_mod.long)
+    hand_dummy = torch_mod.zeros(batch_size, 14, dtype=torch_mod.long)
+    side_dummy = torch_mod.zeros(batch_size, dtype=torch_mod.long)
+    own_atk_dummy = torch_mod.zeros(batch_size, 81, dtype=torch_mod.long)
+    opp_atk_dummy = torch_mod.zeros(batch_size, 81, dtype=torch_mod.long)
+    try:
+        import warnings
+        warnings.filterwarnings("ignore", message=".*legacy TorchScript-based ONNX.*")
+        torch_mod.onnx.export(
+            save_model,
+            (board_dummy, hand_dummy, side_dummy, own_atk_dummy, opp_atk_dummy),
+            onnx_path,
+            dynamo=False,
+            opset_version=17,
+            input_names=["board_tokens", "hand_tokens", "side_token", "own_atk", "opp_atk"],
+            output_names=["value", "policy_logits"],
+            dynamic_axes={
+                "board_tokens": {0: "batch"}, "hand_tokens": {0: "batch"},
+                "side_token": {0: "batch"}, "own_atk": {0: "batch"},
+                "opp_atk": {0: "batch"}, "value": {0: "batch"},
+                "policy_logits": {0: "batch"},
+            },
+        )
+        print(f"ONNX exported: {onnx_path}", file=sys.stderr)
+    except Exception as e:
+        print(f"WARNING: ONNX export failed: {e}", file=sys.stderr)
+        print("Run manually: python tools/export_onnx.py --model " + str(model_path), file=sys.stderr)
+
     return 0
 
 

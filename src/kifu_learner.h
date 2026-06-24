@@ -6,7 +6,7 @@ namespace shogi {
 
 struct KifuLearnConfig {
     std::string trainingFile;
-    std::string weightsPath = "random-shogi.weights";
+    std::string weightsPath = "linear.weights";
     double learningRate = 0.01;
     int epochs = 1;
     int batchSize = 256;

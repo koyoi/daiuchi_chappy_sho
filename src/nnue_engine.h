@@ -30,8 +30,10 @@ public:
     void setThreads(int threads);
     int threadCount() const;
     void setBookEnabled(bool enabled);
+    void setWarnOnNoWeights(bool enabled) { warnOnNoWeights_ = enabled; }
     bool loadBook(const std::string& path = "book.txt");
     bool loadNNUE(const std::string& path);
+    const std::string& nnuePath() const { return nnuePath_; }
     SearchInfo lastSearchInfo() const;
     MateResult searchMate(const Board& board, int timeLimitMs = 500);
 
@@ -53,6 +55,7 @@ private:
     void storeKiller(int ply, const Move& move) const;
     void updateHistory(Color side, const Move& move, int depth, bool good) const;
     void storeCounterMove(Color side, const Move& prevMove, const Move& counterMove) const;
+    void workerSearch(const Board& board, const MoveList& legal, Color rootSide, int threadId) const;
 
     int eval(const Board& board, Color rootSide, int ply) const;
 
@@ -87,6 +90,8 @@ private:
     MateSolver mateSolver_;
     OpeningBook book_;
     bool bookEnabled_ = true;
+    bool warnOnNoWeights_ = true;
+    std::string nnuePath_ = "nnue.bin";
     mutable std::vector<TranspositionEntry> transposition_;
     mutable std::array<std::mutex, LockCount> transpositionMutex_;
     mutable std::uint8_t ttGeneration_{0};

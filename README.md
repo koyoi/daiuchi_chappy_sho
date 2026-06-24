@@ -123,7 +123,7 @@ USI プロトコルで出力される `info depth ... nodes ...` の意味はエ
 | `HeavyEvaluation` | check | false | 重い特徴量（合法手生成ベース）を有効化 |
 | `OpeningSafety` | check | true | 序盤の安全性ペナルティ |
 | `Learning` | check | true | オンライン学習の有効/無効 |
-| `WeightsFile` | string | random-shogi.weights | 線形重みファイルのパス |
+| `WeightsFile` | string | linear.weights | 線形重みファイルのパス |
 
 ## 未実装
 

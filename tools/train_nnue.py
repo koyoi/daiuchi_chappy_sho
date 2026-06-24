@@ -417,10 +417,11 @@ def main():
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     loss_fn = nn.MSELoss()
 
+    dl_workers = 0 if sys.platform == "win32" else min(4, workers)
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
-                              num_workers=min(4, workers), pin_memory=device.type == "cuda")
+                              num_workers=dl_workers, pin_memory=device.type == "cuda")
     val_loader = DataLoader(val_data, batch_size=args.batch_size * 2, shuffle=False,
-                            num_workers=min(4, workers), pin_memory=device.type == "cuda")
+                            num_workers=dl_workers, pin_memory=device.type == "cuda")
 
     best_val_loss = float("inf")
     for epoch in range(1, args.epochs + 1):

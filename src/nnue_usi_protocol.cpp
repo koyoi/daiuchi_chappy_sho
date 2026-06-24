@@ -68,12 +68,16 @@ void handleSetOption(NNUEEngine& engine, const std::vector<std::string>& words) 
         try { engine.setThreads(std::stoi(value)); } catch (...) {}
     } else if (name == "Book") {
         engine.setBookEnabled(value != "false" && value != "0");
+    } else if (name == "WarnOnNoWeights") {
+        engine.setWarnOnNoWeights(value != "false" && value != "0");
     } else if (name == "NNUEFile") {
         if (!value.empty()) {
             if (engine.loadNNUE(value))
                 std::cout << "info string NNUE loaded: " << value << std::endl;
+            else if (!fileExists(value))
+                std::cout << "info string ERROR: " << value << " not found" << std::endl;
             else
-                std::cout << "info string ERROR: failed to load NNUE: " << value << std::endl;
+                std::cout << "info string ERROR: " << value << " format error (bad magic or truncated)" << std::endl;
         }
     } else {
         try { engine.setParam(name, std::stoi(value)); } catch (...) {}
@@ -100,6 +104,7 @@ void nnueUsiLoop() {
             std::cout << "option name Threads type spin default " << engine.threadCount() << " min 1 max 256" << std::endl;
             std::cout << "option name NNUEFile type string default nnue.bin" << std::endl;
             std::cout << "option name Book type check default true" << std::endl;
+            std::cout << "option name WarnOnNoWeights type check default true" << std::endl;
             std::cout << "option name LMRFullDepthMoves type spin default 4 min 1 max 20" << std::endl;
             std::cout << "option name LMRMinDepth type spin default 3 min 1 max 10" << std::endl;
             std::cout << "option name NMPMinDepth type spin default 3 min 1 max 10" << std::endl;
@@ -114,10 +119,14 @@ void nnueUsiLoop() {
             std::cout << "option name RootPruneWidth type spin default 15 min 1 max 100" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
-            if (!engine.loadNNUE("nnue.bin"))
-                std::cout << "info string NNUE weights not found, using random weights" << std::endl;
-            else
+            if (!engine.loadNNUE("nnue.bin")) {
+                if (!fileExists("nnue.bin"))
+                    std::cout << "info string WARNING: nnue.bin not found -- using random weights" << std::endl;
+                else
+                    std::cout << "info string ERROR: nnue.bin format error (bad magic or truncated) -- using random weights" << std::endl;
+            } else {
                 std::cout << "info string NNUE evaluation loaded" << std::endl;
+            }
             if (engine.loadBook())
                 std::cout << "info string Opening book loaded" << std::endl;
             std::cout << "readyok" << std::endl;

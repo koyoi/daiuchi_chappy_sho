@@ -3,6 +3,7 @@
 #include "movegen.h"
 #include "notation.h"
 #include "position.h"
+#include "text_util.h"
 
 #include <algorithm>
 #include <atomic>
@@ -110,6 +111,45 @@ int NNUEEngine::eval(const Board& board, Color rootSide, int ply) const {
     return nnue_.evaluate(board, rootSide);
 }
 
+void NNUEEngine::workerSearch(const Board& board, const MoveList& legal,
+                               Color rootSide, int threadId) const {
+    constexpr int SkipSize[]  = {1,1,2,2,2,2,3,3,3,3,3,3,4,4,4,4,4,4,4,4};
+    constexpr int SkipPhase[] = {0,0,0,1,0,1,0,1,2,0,1,2,0,1,2,3,0,1,2,3};
+    const int si = threadId % 20;
+
+    accStack[0].computed = false;
+    nnue_.computeAccumulatorFull(board, accStack[0]);
+
+    MoveList moves = legal;
+    const int maxDepth = depthLimit();
+    const int pw = rootPruneWidth_;
+
+    for (int depth = 1; depth <= maxDepth && !shouldStop(); ++depth) {
+        if (depth > 1 && (depth + SkipPhase[si]) % SkipSize[si] != 0)
+            continue;
+
+        std::vector<int> scores(moves.size(), std::numeric_limits<int>::min());
+        for (int i = 0; i < static_cast<int>(moves.size()) && !shouldStop(); ++i) {
+            auto delta = nnue_.computeMoveDelta(board, moves[i]);
+            Board next = board;
+            applyMove(next, moves[i]);
+            nnue_.updateAccumulatorIncremental(accStack[0], delta, accStack[1]);
+            int sd = depth - 1;
+            if (pw > 0 && depth >= 3 && i >= pw) sd = std::max(0, depth - 3);
+            scores[i] = search(next, sd, 1, -MateScore, MateScore, rootSide, true, moves[i]);
+        }
+
+        if (shouldStop()) break;
+        struct IS { int idx; int sc; };
+        std::vector<IS> ranked(moves.size());
+        for (int i = 0; i < static_cast<int>(moves.size()); ++i) ranked[i] = {i, scores[i]};
+        std::stable_sort(ranked.begin(), ranked.end(), [](const IS& a, const IS& b) { return a.sc > b.sc; });
+        MoveList reordered;
+        for (const auto& r : ranked) reordered.push_back(moves[r.idx]);
+        moves = reordered;
+    }
+}
+
 Move NNUEEngine::chooseMove(const Board& board) {
     return chooseMove(board, SearchLimits{maxMoveTimeMs_});
 }
@@ -126,6 +166,14 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
     const int requestedMoveTime = limits.moveTimeMs > 0 ? limits.moveTimeMs : maxMoveTimeMs_;
     const int moveTime = std::clamp(requestedMoveTime, 50, 600000);
     deadline_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(moveTime);
+
+    std::cout << "info string params: " << nnuePath_ << " (" << fileModTime(nnuePath_) << ")" << std::endl;
+    if (warnOnNoWeights_ && !nnue_.loaded()) {
+        if (!fileExists(nnuePath_))
+            std::cout << "info string WARNING: " << nnuePath_ << " not found -- using random weights" << std::endl;
+        else
+            std::cout << "info string ERROR: " << nnuePath_ << " format error -- using random weights" << std::endl;
+    }
 
     nnue_.computeAccumulatorFull(board, accStack[0]);
 
@@ -179,8 +227,26 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
         }
     }
 
+    {
+        const Color opponent = (rootSide == Black) ? White : Black;
+        MateResult tsumero = mateSolver_.detectTsumero(board, opponent, 7);
+        if (tsumero.found) {
+            std::cout << "info string tsumero detected -- extending search time" << std::endl;
+            deadline_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(moveTime * 3 / 2);
+        }
+    }
+
     orderMoves(board, legal, rootSide, 0);
     clearSearchTables();
+
+    std::vector<std::thread> helpers;
+    if (threads_ > 1 && legal.size() > 1) {
+        for (int t = 1; t < threads_; ++t) {
+            helpers.emplace_back([this, &board, &legal, rootSide, t]() {
+                workerSearch(board, legal, rootSide, t);
+            });
+        }
+    }
 
     int completedDepth = 0;
     int bestScore = std::numeric_limits<int>::min();
@@ -197,52 +263,20 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
             aspirationBeta = prevIterScore + aspirationWindow_;
         }
 
-        // Score root moves
+        // Score root moves (main thread only; helpers run workerSearch in parallel)
         std::vector<int> scores(legal.size(), std::numeric_limits<int>::min());
         {
-            std::atomic<int> sharedAlpha{aspirationAlpha};
-            const int workerCount = std::min<int>(std::max(1, threads_), legal.size());
-
-            if (workerCount <= 1) {
-                int runningAlpha = aspirationAlpha;
-                for (int i = 0; i < legal.size(); ++i) {
-                    if (shouldStop()) break;
-                    auto delta = nnue_.computeMoveDelta(board, legal[i]);
-                    Board next = board;
-                    applyMove(next, legal[i]);
-                    nnue_.updateAccumulatorIncremental(accStack[0], delta, accStack[1]);
-                    int sd = depth - 1;
-                    if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) sd = std::max(0, depth - 3);
-                    scores[i] = search(next, sd, 1, runningAlpha, aspirationBeta, rootSide, true, legal[i]);
-                    runningAlpha = std::max(runningAlpha, scores[i]);
-                }
-            } else {
-                std::atomic_int nextIndex{0};
-                std::vector<std::thread> workers;
-                workers.reserve(workerCount);
-                for (int w = 0; w < workerCount; ++w) {
-                    workers.emplace_back([&]() {
-                        accStack[0].computed = false;
-                        nnue_.computeAccumulatorFull(board, accStack[0]);
-                        while (!shouldStop()) {
-                            const int i = nextIndex.fetch_add(1);
-                            if (i >= static_cast<int>(legal.size())) break;
-                            auto delta = nnue_.computeMoveDelta(board, legal[i]);
-                            Board next = board;
-                            applyMove(next, legal[i]);
-                            nnue_.updateAccumulatorIncremental(accStack[0], delta, accStack[1]);
-                            int sd = depth - 1;
-                            if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) sd = std::max(0, depth - 3);
-                            const int la = sharedAlpha.load(std::memory_order_relaxed);
-                            scores[i] = search(next, sd, 1, la, aspirationBeta, rootSide, true, legal[i]);
-                            int expected = sharedAlpha.load(std::memory_order_relaxed);
-                            while (scores[i] > expected) {
-                                if (sharedAlpha.compare_exchange_weak(expected, scores[i], std::memory_order_relaxed)) break;
-                            }
-                        }
-                    });
-                }
-                for (auto& w : workers) if (w.joinable()) w.join();
+            int runningAlpha = aspirationAlpha;
+            for (int i = 0; i < static_cast<int>(legal.size()); ++i) {
+                if (shouldStop()) break;
+                auto delta = nnue_.computeMoveDelta(board, legal[i]);
+                Board next = board;
+                applyMove(next, legal[i]);
+                nnue_.updateAccumulatorIncremental(accStack[0], delta, accStack[1]);
+                int sd = depth - 1;
+                if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) sd = std::max(0, depth - 3);
+                scores[i] = search(next, sd, 1, runningAlpha, aspirationBeta, rootSide, true, legal[i]);
+                runningAlpha = std::max(runningAlpha, scores[i]);
             }
         }
 
@@ -318,6 +352,9 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
             prevIterScore = depthBestScore;
         }
     }
+
+    stopped_.store(true);
+    for (auto& h : helpers) if (h.joinable()) h.join();
 
     if (bestMoves.empty()) bestMoves.push_back(legal.front());
     std::uniform_int_distribution<std::size_t> dist(0, bestMoves.size() - 1);
@@ -778,7 +815,7 @@ void NNUEEngine::setThreads(int threads) { threads_ = std::clamp(threads, 1, 256
 int NNUEEngine::threadCount() const { return threads_; }
 void NNUEEngine::setBookEnabled(bool enabled) { bookEnabled_ = enabled; }
 bool NNUEEngine::loadBook(const std::string& path) { return book_.load(path); }
-bool NNUEEngine::loadNNUE(const std::string& path) { return nnue_.load(path); }
+bool NNUEEngine::loadNNUE(const std::string& path) { nnuePath_ = path; return nnue_.load(path); }
 
 void NNUEEngine::setParam(const std::string& name, int value) {
     if (name == "LMRFullDepthMoves") lmrFullDepthMoves_ = value;

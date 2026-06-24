@@ -42,9 +42,12 @@ public:
     void setTrainingDataPath(const std::string& path);
     bool loadWeights();
     bool loadMlpWeights(const std::string& path);
+    void setUseMlp(bool use) { evaluator_.setUseMlp(use); }
     const std::string& weightsPath() const;
+    const std::string& mlpWeightsPath() const { return mlpWeightsPath_; }
     void setRootPruneWidth(int width);
     void setBookEnabled(bool enabled);
+    void setWarnOnNoWeights(bool enabled) { warnOnNoWeights_ = enabled; }
     bool loadBook(const std::string& path = "book.txt");
     SearchInfo lastSearchInfo() const;
     MateResult searchMate(const Board& board, int timeLimitMs = 500);
@@ -111,6 +114,8 @@ private:
     MateSolver mateSolver_;
     OpeningBook book_;
     bool bookEnabled_ = true;
+    bool warnOnNoWeights_ = true;
+    std::string mlpWeightsPath_ = "mlp.weights";
     mutable std::vector<TranspositionEntry> transposition_;
     mutable std::array<std::mutex, LockCount> transpositionMutex_;
     mutable std::uint8_t ttGeneration_{0};

@@ -60,6 +60,7 @@ public:
     static std::string encodeBoardState(const Board& board);
 
     bool ensureProcess();
+    bool isReady() const { return processRunning_; }
     void shutdown();
     const std::string& lastError() const { return lastError_; }
     const std::string& modelPath() const { return settings_.model; }

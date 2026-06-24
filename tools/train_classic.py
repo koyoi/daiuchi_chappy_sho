@@ -219,7 +219,7 @@ def main():
         description="Train classic engine evaluation from Floodgate kifu (Bonanza method)")
     parser.add_argument("--kifu", required=True, help="Kifu directory")
     parser.add_argument("--engine", required=True, help="kishi-to-classic executable")
-    parser.add_argument("--weights", default="random-shogi.weights",
+    parser.add_argument("--weights", default="linear.weights",
                         help="Weights file path")
     parser.add_argument("--min-rate", type=int, default=1500,
                         help="Minimum player rating (default: 1500)")

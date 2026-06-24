@@ -61,7 +61,11 @@ void handleSetOption(MCTSEngineWrapper& engine, const std::vector<std::string>& 
         engine.setNNScript(value);
     }
 #endif
-    else if (name == "NNModel") {
+    else if (name == "Book") {
+        engine.setBookEnabled(value != "false" && value != "0");
+    } else if (name == "WarnOnNoModel") {
+        engine.setWarnOnNoModel(value != "false" && value != "0");
+    } else if (name == "NNModel") {
         engine.setNNModel(value);
     } else if (name == "NNDevice") {
         engine.setNNDevice(value);
@@ -140,18 +144,24 @@ void mctsUsiLoop() {
             std::cout << "option name NNModel type string default nn_model.onnx" << std::endl;
 #endif
             std::cout << "option name NNDevice type string default auto" << std::endl;
+            std::cout << "option name Book type check default true" << std::endl;
+            std::cout << "option name WarnOnNoModel type check default true" << std::endl;
             std::cout << "option name MctsBatchSize type spin default 8 min 1 max 64" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
             if (!engine.ensureNN()) {
-                std::cout << "info string ERROR: failed to start NN process for model: "
-                          << engine.nnModelPath() << std::endl;
+                if (!fileExists(engine.nnModelPath()))
+                    std::cout << "info string ERROR: " << engine.nnModelPath() << " not found" << std::endl;
+                else
+                    std::cout << "info string ERROR: " << engine.nnModelPath() << " load failed" << std::endl;
                 if (!engine.nnLastError().empty()) {
                     std::cout << "info string  -> " << engine.nnLastError() << std::endl;
                 }
             } else {
                 std::cout << "info string NN model loaded: " << engine.nnModelPath() << std::endl;
             }
+            if (engine.loadBook())
+                std::cout << "info string Opening book loaded" << std::endl;
             std::cout << "readyok" << std::endl;
         } else if (command == "setoption") {
             handleSetOption(engine, words);

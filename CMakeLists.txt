@@ -60,6 +60,7 @@ set(MCTS_SOURCES
     src/mcts.cpp
     src/nn_bridge.cpp
     src/mate_solver.cpp
+    src/opening_book.cpp
     src/mcts_engine.cpp
     src/mcts_usi_protocol.cpp
     src/mcts_main.cpp

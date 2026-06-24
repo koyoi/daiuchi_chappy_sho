@@ -30,7 +30,7 @@ MSVC builds require `/utf-8` (already in CMakeLists.txt) because source files co
 echo -e "usi\nisready\nposition startpos\ngo movetime 3000\nquit" | ./build/kishi-to-classic
 ```
 
-The executable sets its working directory to its own location on startup, so `random-shogi.weights`, `mlp.weights`, and `book.txt` are resolved relative to the exe.
+The executable sets its working directory to its own location on startup, so `linear.weights`, `mlp.weights`, and `book.txt` are resolved relative to the exe.
 
 To generate an opening book: `python tools/gen_book.py --engine build/Release/kishi-to-classic.exe --movetime 10000 --plies 8`
 

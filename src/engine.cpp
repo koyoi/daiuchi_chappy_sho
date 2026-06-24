@@ -3,12 +3,14 @@
 #include "movegen.h"
 #include "notation.h"
 #include "position.h"
+#include "text_util.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -253,6 +255,18 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
     const int moveTime = std::clamp(requestedMoveTime, 50, 600000);
     deadline_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(moveTime);
 
+    if (evaluator_.useMlp() && evaluator_.mlpLoaded()) {
+        std::cout << "info string params: " << mlpWeightsPath_ << " (" << fileModTime(mlpWeightsPath_) << ") [MLP]" << std::endl;
+    } else {
+        std::cout << "info string params: " << weightsPath() << " (" << fileModTime(weightsPath()) << ") [linear]" << std::endl;
+    }
+    if (warnOnNoWeights_ && evaluator_.useMlp() && !evaluator_.mlpLoaded()) {
+        if (!fileExists(mlpWeightsPath_))
+            std::cout << "info string WARNING: " << mlpWeightsPath_ << " not found -- using linear evaluation" << std::endl;
+        else
+            std::cout << "info string ERROR: " << mlpWeightsPath_ << " format error -- using linear evaluation" << std::endl;
+    }
+
     auto legal = generateLegalMoves(board, true);
     if (legal.empty()) {
         SearchInfo info;
@@ -310,6 +324,15 @@ Move LearningEngine::chooseMove(const Board& board, const SearchLimits& limits, 
             setLastSearchInfo(info);
             if (infoCallback) infoCallback(info);
             return mateResult.bestMove;
+        }
+    }
+
+    {
+        const Color opponent = (rootSide == Black) ? White : Black;
+        MateResult tsumero = mateSolver_.detectTsumero(board, opponent, 7);
+        if (tsumero.found) {
+            std::cout << "info string tsumero detected -- extending search time" << std::endl;
+            deadline_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(moveTime * 3 / 2);
         }
     }
 
@@ -518,6 +541,7 @@ const std::string& LearningEngine::weightsPath() const {
 }
 
 bool LearningEngine::loadMlpWeights(const std::string& path) {
+    mlpWeightsPath_ = path;
     return evaluator_.loadMlp(path);
 }
 

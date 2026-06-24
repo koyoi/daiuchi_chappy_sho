@@ -8,6 +8,7 @@ Usage:
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -46,6 +47,7 @@ def main():
     own_atk = torch.zeros(batch_size, 81, dtype=torch.long)
     opp_atk = torch.zeros(batch_size, 81, dtype=torch.long)
 
+    warnings.filterwarnings("ignore", message=".*legacy TorchScript-based ONNX.*")
     torch.onnx.export(
         model,
         (board_tokens, hand_tokens, side_token, own_atk, opp_atk),

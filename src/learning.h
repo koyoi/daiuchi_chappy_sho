@@ -39,7 +39,7 @@ private:
 
     Evaluator& evaluator_;
     std::vector<RecordedPly> game_;
-    std::string weightsPath_ = "random-shogi.weights";
+    std::string weightsPath_ = "linear.weights";
     std::string trainingDataPath_ = "mlp_training.tsv";
     double learningRate_ = 1.5;
     bool enabled_ = true;

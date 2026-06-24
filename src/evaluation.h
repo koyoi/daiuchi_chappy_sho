@@ -34,6 +34,8 @@ public:
 
     bool loadMlp(const std::string& path);
     bool mlpLoaded() const { return mlpLoaded_; }
+    void setUseMlp(bool use) { useMlp_ = use; }
+    bool useMlp() const { return useMlp_; }
 
 private:
     int evaluateMlp(const FeatureVector& features) const;
@@ -48,6 +50,7 @@ private:
     double w3_[MlpHidden2]{};
     double b3_ = 0.0;
     bool mlpLoaded_ = false;
+    bool useMlp_ = true;
 };
 
 FeatureVector operator-(const FeatureVector& left, const FeatureVector& right);

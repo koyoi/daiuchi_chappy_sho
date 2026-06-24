@@ -1034,7 +1034,7 @@ FeatureVector Evaluator::extractFeatures(const Board& board, Color perspective) 
 
 int Evaluator::evaluate(const Board& board, Color perspective) const {
     const FeatureVector features = extractFeatures(board, perspective);
-    if (mlpLoaded_) {
+    if (useMlp_ && mlpLoaded_) {
         return evaluateMlp(features);
     }
     const double score = std::inner_product(features.begin(), features.end(), weights_.begin(), 0.0);
