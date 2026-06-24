@@ -56,8 +56,9 @@ void NNUENetwork::initRandom() {
 
     for (int i = 0; i < nnue::InputDim; ++i)
         for (int j = 0; j < nnue::L0Size; ++j)
-            l0Weights_[i][j] = he(nnue::InputDim);
-    std::fill(std::begin(l0Biases_), std::end(l0Biases_), 0.0f);
+            l0Weights_[i][j] = static_cast<std::int16_t>(std::round(he(nnue::InputDim) * nnue::WeightScale));
+    for (int j = 0; j < nnue::L0Size; ++j)
+        l0Biases_[j] = 0;
 
     for (int i = 0; i < 2 * nnue::L0Size; ++i)
         for (int j = 0; j < nnue::L1Size; ++j)
@@ -75,7 +76,7 @@ void NNUENetwork::initRandom() {
     loaded_ = false;
 }
 
-void NNUENetwork::computeAccumulator(const std::vector<int>& activeFeatures, float* output) const {
+void NNUENetwork::computeAccumulator(const std::vector<int>& activeFeatures, std::int32_t* output) const {
     std::copy(std::begin(l0Biases_), std::end(l0Biases_), output);
     for (int fi : activeFeatures) {
         if (fi < 0 || fi >= nnue::InputDim) continue;
@@ -131,7 +132,6 @@ nnue::FeatureDelta NNUENetwork::computeMoveDelta(const Board& board, const Move&
             const int oldCount = hand(board, mover)[move.drop];
             int fi = nnue::handFeatureIndex(perspective, mover, move.drop, oldCount);
             if (fi >= 0) removed[nRemoved++] = fi;
-            // newCount = oldCount - 1; if > 0, that feature stays active (cumulative)
         } else {
             removed[nRemoved++] = nnue::boardFeatureIndex(perspective, moverColor, move.piece, move.from);
 
@@ -148,10 +148,6 @@ nnue::FeatureDelta NNUENetwork::computeMoveDelta(const Board& board, const Move&
                 const int oldCount = hand(board, mover)[capBase];
                 int newCount = oldCount + 1;
                 added[nAdded++] = nnue::handFeatureIndex(perspective, mover, capBase, newCount);
-
-                if (oldCount > 0) {
-                    // nothing to remove: cumulative encoding means count=oldCount stays active
-                }
             }
         }
     }
@@ -196,10 +192,11 @@ void NNUENetwork::updateAccumulatorIncremental(const nnue::Accumulator& parent, 
 }
 
 int NNUENetwork::evaluateFromAccumulator(const nnue::Accumulator& acc, Color perspective) const {
+    constexpr float invScale = 1.0f / nnue::WeightScale;
     float clampedBlack[nnue::L0Size], clampedWhite[nnue::L0Size];
     for (int i = 0; i < nnue::L0Size; ++i) {
-        clampedBlack[i] = std::clamp(acc.black[i], 0.0f, 1.0f);
-        clampedWhite[i] = std::clamp(acc.white[i], 0.0f, 1.0f);
+        clampedBlack[i] = std::clamp(static_cast<float>(acc.black[i]) * invScale, 0.0f, 1.0f);
+        clampedWhite[i] = std::clamp(static_cast<float>(acc.white[i]) * invScale, 0.0f, 1.0f);
     }
 
     float concat[2 * nnue::L0Size];
@@ -232,54 +229,9 @@ int NNUENetwork::evaluateFromAccumulator(const nnue::Accumulator& acc, Color per
 }
 
 int NNUENetwork::evaluate(const Board& board, Color perspective) const {
-    auto blackFeatures = extractActiveFeatures(board, Black);
-    auto whiteFeatures = extractActiveFeatures(board, White);
-
-    float accBlack[nnue::L0Size], accWhite[nnue::L0Size];
-    computeAccumulator(blackFeatures, accBlack);
-    computeAccumulator(whiteFeatures, accWhite);
-
-    for (int i = 0; i < nnue::L0Size; ++i) {
-        accBlack[i] = std::clamp(accBlack[i], 0.0f, 1.0f);
-        accWhite[i] = std::clamp(accWhite[i], 0.0f, 1.0f);
-    }
-
-    float concat[2 * nnue::L0Size];
-    if (perspective == Black) {
-        std::copy(accBlack, accBlack + nnue::L0Size, concat);
-        std::copy(accWhite, accWhite + nnue::L0Size, concat + nnue::L0Size);
-    } else {
-        std::copy(accWhite, accWhite + nnue::L0Size, concat);
-        std::copy(accBlack, accBlack + nnue::L0Size, concat + nnue::L0Size);
-    }
-
-    // L1
-    float h1[nnue::L1Size];
-    for (int j = 0; j < nnue::L1Size; ++j) {
-        float sum = l1Biases_[j];
-        for (int i = 0; i < 2 * nnue::L0Size; ++i) {
-            sum += concat[i] * l1Weights_[i][j];
-        }
-        h1[j] = std::clamp(sum, 0.0f, 1.0f);
-    }
-
-    // L2
-    float h2[nnue::L2Size];
-    for (int j = 0; j < nnue::L2Size; ++j) {
-        float sum = l2Biases_[j];
-        for (int i = 0; i < nnue::L1Size; ++i) {
-            sum += h1[i] * l2Weights_[i][j];
-        }
-        h2[j] = std::clamp(sum, 0.0f, 1.0f);
-    }
-
-    // L3
-    float output = l3Bias_;
-    for (int i = 0; i < nnue::L2Size; ++i) {
-        output += h2[i] * l3Weights_[i];
-    }
-
-    return static_cast<int>(output * 600.0f);
+    nnue::Accumulator acc;
+    computeAccumulatorFull(board, acc);
+    return evaluateFromAccumulator(acc, perspective);
 }
 
 bool NNUENetwork::load(const std::string& path) {
@@ -288,27 +240,29 @@ bool NNUENetwork::load(const std::string& path) {
 
     char magic[4];
     file.read(magic, 4);
-    if (std::strncmp(magic, "NNUE", 4) != 0) return false;
 
-    file.read(reinterpret_cast<char*>(l0Weights_), sizeof(l0Weights_));
-    file.read(reinterpret_cast<char*>(l0Biases_), sizeof(l0Biases_));
-    file.read(reinterpret_cast<char*>(l1Weights_), sizeof(l1Weights_));
-    file.read(reinterpret_cast<char*>(l1Biases_), sizeof(l1Biases_));
-    file.read(reinterpret_cast<char*>(l2Weights_), sizeof(l2Weights_));
-    file.read(reinterpret_cast<char*>(l2Biases_), sizeof(l2Biases_));
-    file.read(reinterpret_cast<char*>(l3Weights_), sizeof(l3Weights_));
-    file.read(reinterpret_cast<char*>(&l3Bias_), sizeof(l3Bias_));
+    if (std::strncmp(magic, "NNU2", 4) == 0) {
+        file.read(reinterpret_cast<char*>(l0Weights_), sizeof(l0Weights_));
+        file.read(reinterpret_cast<char*>(l0Biases_), sizeof(l0Biases_));
+        file.read(reinterpret_cast<char*>(l1Weights_), sizeof(l1Weights_));
+        file.read(reinterpret_cast<char*>(l1Biases_), sizeof(l1Biases_));
+        file.read(reinterpret_cast<char*>(l2Weights_), sizeof(l2Weights_));
+        file.read(reinterpret_cast<char*>(l2Biases_), sizeof(l2Biases_));
+        file.read(reinterpret_cast<char*>(l3Weights_), sizeof(l3Weights_));
+        file.read(reinterpret_cast<char*>(&l3Bias_), sizeof(l3Bias_));
+        if (!file) return false;
+        loaded_ = true;
+        return true;
+    }
 
-    if (!file) return false;
-    loaded_ = true;
-    return true;
+    return false;
 }
 
 bool NNUENetwork::save(const std::string& path) const {
     std::ofstream file(path, std::ios::binary);
     if (!file) return false;
 
-    file.write("NNUE", 4);
+    file.write("NNU2", 4);
     file.write(reinterpret_cast<const char*>(l0Weights_), sizeof(l0Weights_));
     file.write(reinterpret_cast<const char*>(l0Biases_), sizeof(l0Biases_));
     file.write(reinterpret_cast<const char*>(l1Weights_), sizeof(l1Weights_));

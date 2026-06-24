@@ -19,15 +19,16 @@ constexpr int HandFeatures = 2 * HandFeaturesPerColor; // 76
 constexpr int InputDim = BoardFeatures + HandFeatures; // 2344
 
 constexpr int L0Size = 256;
-constexpr int L1Size = 32;
+constexpr int L1Size = 64;
 constexpr int L2Size = 32;
+constexpr int WeightScale = 64;
 
 int boardFeatureIndex(Color perspective, int pieceColor, PieceType type, int square);
 int handFeatureIndex(Color perspective, Color handColor, PieceType type, int count);
 
 struct Accumulator {
-    alignas(64) float black[L0Size];
-    alignas(64) float white[L0Size];
+    alignas(64) std::int32_t black[L0Size];
+    alignas(64) std::int32_t white[L0Size];
     bool computed = false;
 };
 
@@ -56,10 +57,10 @@ public:
     int evaluateFromAccumulator(const nnue::Accumulator& acc, Color perspective) const;
 
 private:
-    void computeAccumulator(const std::vector<int>& activeFeatures, float* output) const;
+    void computeAccumulator(const std::vector<int>& activeFeatures, std::int32_t* output) const;
 
-    float l0Weights_[nnue::InputDim][nnue::L0Size]{};
-    float l0Biases_[nnue::L0Size]{};
+    std::int16_t l0Weights_[nnue::InputDim][nnue::L0Size]{};
+    std::int32_t l0Biases_[nnue::L0Size]{};
     float l1Weights_[2 * nnue::L0Size][nnue::L1Size]{};
     float l1Biases_[nnue::L1Size]{};
     float l2Weights_[nnue::L1Size][nnue::L2Size]{};

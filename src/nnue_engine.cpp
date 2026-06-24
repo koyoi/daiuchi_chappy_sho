@@ -392,6 +392,24 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
         else { if (nullVal <= alpha) return nullVal; }
     }
 
+    int staticEval = eval(board, rootSide, ply);
+
+    // Reverse futility pruning
+    if (!inCheck && depth <= 3 && ply > 0 && std::abs(alpha) < MateScore / 2 && std::abs(beta) < MateScore / 2) {
+        const int rfpMargin = depth * 200;
+        if (maximizing && staticEval - rfpMargin >= beta) return staticEval;
+        if (!maximizing && staticEval + rfpMargin <= alpha) return staticEval;
+    }
+
+    // Razoring
+    if (!inCheck && depth <= 2 && ply > 0 && std::abs(alpha) < MateScore / 2 && std::abs(beta) < MateScore / 2) {
+        const int razorMargin = 300 + depth * 200;
+        if (maximizing && staticEval + razorMargin <= alpha)
+            return quiescence(board, qDepth_, ply, alpha, beta, rootSide);
+        if (!maximizing && staticEval - razorMargin >= beta)
+            return quiescence(board, qDepth_, ply, alpha, beta, rootSide);
+    }
+
     if (ttMove.to < 0 && depth >= iidMinDepth_ && !inCheck) {
         search(board, depth - 3, ply, alpha, beta, rootSide, false, prevMove);
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
@@ -402,9 +420,8 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
     orderMoves(board, legal, rootSide, ply, prevMove);
 
     const bool canFutilityPrune = !inCheck && (depth == 1 || depth == 2);
-    int staticEval = 0;
-    if (canFutilityPrune) staticEval = eval(board, rootSide, ply);
     const int futilityMargin = depth == 1 ? futilityMargin1_ : futilityMargin2_;
+    const int lmpThreshold = 3 + depth * depth;
 
     if (maximizing) {
         int best = std::numeric_limits<int>::min();
@@ -418,6 +435,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
             const bool isQuiet = (move.isDrop() || board.squares[move.to] == 0) && !move.promote;
             const bool isCheck = givesCheck(board, move);
             if (canFutilityPrune && isQuiet && !isCheck && staticEval + futilityMargin <= alpha) { ++moveIndex; continue; }
+            if (depth <= 3 && moveIndex >= lmpThreshold && isQuiet && !isCheck && !inCheck && anySearched) { ++moveIndex; continue; }
 
             auto delta = nnue_.computeMoveDelta(board, move);
             UndoInfo undo;
@@ -489,6 +507,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
         const bool isQuiet = (move.isDrop() || board.squares[move.to] == 0) && !move.promote;
         const bool isCheck = givesCheck(board, move);
         if (canFutilityPrune && isQuiet && !isCheck && staticEval - futilityMargin >= beta) { ++moveIndex; continue; }
+        if (depth <= 3 && moveIndex >= lmpThreshold && isQuiet && !isCheck && !inCheck && anySearched) { ++moveIndex; continue; }
 
         auto delta = nnue_.computeMoveDelta(board, move);
         UndoInfo undo;

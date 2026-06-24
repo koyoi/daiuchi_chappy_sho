@@ -57,8 +57,9 @@ HAND_FEATURES = 2 * HAND_FEATURES_PER_COLOR  # 76
 INPUT_DIM = BOARD_FEATURES + HAND_FEATURES   # 2344
 
 L0_SIZE = 256
-L1_SIZE = 32
+L1_SIZE = 64
 L2_SIZE = 32
+WEIGHT_SCALE = 64
 
 # C++ piece type mapping
 PT_PAWN = 1; PT_LANCE = 2; PT_KNIGHT = 3; PT_SILVER = 4
@@ -319,25 +320,34 @@ class NNUEModel(nn.Module):
 
 
 def export_nnue_bin(model: NNUEModel, path: str):
-    """Export trained model to binary format matching nnue.cpp's load()."""
+    """Export trained model to NNU2 binary format matching nnue.cpp's load().
+
+    L0 weights are quantized to int16 (scaled by WEIGHT_SCALE=64).
+    L0 biases are stored as int32 (scaled by WEIGHT_SCALE).
+    L1-L3 weights and biases remain float32.
+    """
     with open(path, "wb") as f:
-        f.write(b"NNUE")
-        # l0Weights_[INPUT_DIM][L0_SIZE] - row major
-        w0 = model.l0.weight.data.t().cpu().numpy()  # [INPUT_DIM, L0_SIZE]
-        f.write(w0.astype(np.float32).tobytes())
-        f.write(model.l0.bias.data.cpu().numpy().astype(np.float32).tobytes())
-        # l1Weights_[2*L0_SIZE][L1_SIZE]
+        f.write(b"NNU2")
+        # l0Weights_[INPUT_DIM][L0_SIZE] as int16
+        w0 = model.l0.weight.data.t().cpu()  # [INPUT_DIM, L0_SIZE]
+        w0_q = (w0 * WEIGHT_SCALE).round().clamp(-32768, 32767).to(torch.int16)
+        f.write(w0_q.numpy().tobytes())
+        # l0Biases_[L0_SIZE] as int32
+        b0 = model.l0.bias.data.cpu()
+        b0_q = (b0 * WEIGHT_SCALE).round().clamp(-2147483648, 2147483647).to(torch.int32)
+        f.write(b0_q.numpy().tobytes())
+        # l1Weights_[2*L0_SIZE][L1_SIZE] as float32
         w1 = model.l1.weight.data.t().cpu().numpy()
         f.write(w1.astype(np.float32).tobytes())
         f.write(model.l1.bias.data.cpu().numpy().astype(np.float32).tobytes())
-        # l2Weights_[L1_SIZE][L2_SIZE]
+        # l2Weights_[L1_SIZE][L2_SIZE] as float32
         w2 = model.l2.weight.data.t().cpu().numpy()
         f.write(w2.astype(np.float32).tobytes())
         f.write(model.l2.bias.data.cpu().numpy().astype(np.float32).tobytes())
-        # l3Weights_[L2_SIZE]
+        # l3Weights_[L2_SIZE] as float32
         f.write(model.l3.weight.data.squeeze(0).cpu().numpy().astype(np.float32).tobytes())
         f.write(model.l3.bias.data.cpu().numpy().astype(np.float32).tobytes())
-    print(f"Exported NNUE weights to {path}")
+    print(f"Exported NNU2 weights to {path}")
 
 
 def load_index(kifu_dir: str) -> list:
