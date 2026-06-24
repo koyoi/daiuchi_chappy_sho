@@ -14,6 +14,7 @@ import os
 import random
 import sys
 import time
+import numpy as np
 from concurrent.futures import ProcessPoolExecutor
 from itertools import repeat
 from pathlib import Path
@@ -180,9 +181,9 @@ def _parse_and_sample_file(filepath: str, min_rate: int,
     return sample_positions(samples, sample_rate, opening_n, endgame_n)
 
 
-def samples_to_tensors(samples: List[dict], torch_mod, device,
+def samples_to_tensors(samples: List[dict], torch_mod, device=None,
                        tensor_threads: int = 0):
-    """Convert parsed samples to training tensors."""
+    """Convert parsed samples to CPU tensors (kept on CPU for per-batch GPU transfer)."""
     if tensor_threads > 0:
         torch_mod.set_num_threads(tensor_threads)
 
@@ -194,54 +195,53 @@ def samples_to_tensors(samples: List[dict], torch_mod, device,
     policies = [s["move_index"] for s in samples]
     print(f" {time.time() - t0:.1f}s", file=sys.stderr)
 
-    print(f"  Building encoded tensor ({n:,} x {len(encoded_rows[0])})...",
+    cols = len(encoded_rows[0])
+    print(f"  Building numpy array ({n:,} x {cols})...",
           end="", file=sys.stderr, flush=True)
     t0 = time.time()
-    encoded_t = torch_mod.tensor(encoded_rows, dtype=torch_mod.long)
+    encoded_np = np.array(encoded_rows, dtype=np.int16)
     del encoded_rows
     print(f" {time.time() - t0:.1f}s", file=sys.stderr)
 
-    print("  Slicing board/hand/side/attack tensors...", end="", file=sys.stderr, flush=True)
+    print("  Converting to tensors...", end="", file=sys.stderr, flush=True)
     t0 = time.time()
-    board_t = encoded_t[:, :BOARD_SQUARES].clamp_(0, VOCAB_SIZE - 1)
-    hand_start = BOARD_SQUARES
-    hand_end = BOARD_SQUARES + 2 * HAND_TYPES
-    hand_t = encoded_t[:, hand_start:hand_end].clamp_(0, HAND_MAX)
-    side_t = encoded_t[:, hand_end]
+    board_t, hand_t, side_t, own_atk_t, opp_atk_t = _encoded_np_to_tensors(
+        encoded_np, n, torch_mod)
+    del encoded_np
 
-    own_start = BASE_STATE_SIZE
-    own_end = BASE_STATE_SIZE + BOARD_SQUARES
-    opp_start = own_end
-    opp_end = own_end + BOARD_SQUARES
-
-    if encoded_t.size(1) >= opp_end:
-        own_atk_t = encoded_t[:, own_start:own_end].clamp_(0, MAX_ATTACK)
-        opp_atk_t = encoded_t[:, opp_start:opp_end].clamp_(0, MAX_ATTACK)
-    else:
-        own_atk_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
-        opp_atk_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
-    del encoded_t
-    print(f" {time.time() - t0:.1f}s", file=sys.stderr)
-
-    print("  Building value/policy tensors...", end="", file=sys.stderr, flush=True)
-    t0 = time.time()
-    value_t = torch_mod.tensor(values, dtype=torch_mod.float32)
-    policy_t = torch_mod.tensor(policies, dtype=torch_mod.long)
+    value_t = torch_mod.from_numpy(np.array(values, dtype=np.float32))
+    policy_t = torch_mod.from_numpy(np.array(policies, dtype=np.int64))
     del values, policies
     print(f" {time.time() - t0:.1f}s", file=sys.stderr)
 
-    if device.type != "cpu":
-        print(f"  Transferring to {device}...", end="", file=sys.stderr, flush=True)
-        t0 = time.time()
-        board_t, hand_t, side_t = board_t.to(device), hand_t.to(device), side_t.to(device)
-        own_atk_t, opp_atk_t = own_atk_t.to(device), opp_atk_t.to(device)
-        value_t, policy_t = value_t.to(device), policy_t.to(device)
-        print(f" {time.time() - t0:.1f}s", file=sys.stderr)
-        return (board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t)
+    return (board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t)
 
-    return (board_t.to(device), hand_t.to(device), side_t.to(device),
-            own_atk_t.to(device), opp_atk_t.to(device),
-            value_t.to(device), policy_t.to(device))
+
+def _encoded_np_to_tensors(encoded_np, n, torch_mod):
+    """Slice encoded numpy array into individual CPU tensors."""
+    hand_start = BOARD_SQUARES
+    hand_end = BOARD_SQUARES + 2 * HAND_TYPES
+    own_start = BASE_STATE_SIZE
+    own_end = BASE_STATE_SIZE + BOARD_SQUARES
+    opp_end = own_end + BOARD_SQUARES
+
+    board_t = torch_mod.from_numpy(
+        encoded_np[:, :BOARD_SQUARES].astype(np.int64)).clamp_(0, VOCAB_SIZE - 1)
+    hand_t = torch_mod.from_numpy(
+        encoded_np[:, hand_start:hand_end].astype(np.int64)).clamp_(0, HAND_MAX)
+    side_t = torch_mod.from_numpy(
+        encoded_np[:, hand_end].astype(np.int64))
+
+    if encoded_np.shape[1] >= opp_end:
+        own_atk_t = torch_mod.from_numpy(
+            encoded_np[:, own_start:own_end].astype(np.int64)).clamp_(0, MAX_ATTACK)
+        opp_atk_t = torch_mod.from_numpy(
+            encoded_np[:, own_end:opp_end].astype(np.int64)).clamp_(0, MAX_ATTACK)
+    else:
+        own_atk_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
+        opp_atk_t = torch_mod.zeros(n, BOARD_SQUARES, dtype=torch_mod.long)
+
+    return board_t, hand_t, side_t, own_atk_t, opp_atk_t
 
 
 def _parse_file_no_sample(filepath: str, min_rate: int):
@@ -303,10 +303,68 @@ def load_games_grouped(kifu_dir: Path, min_rate: int, max_games: int,
     return all_samples, game_slices
 
 
+def save_cache(path, samples, game_slices=None):
+    """Save parsed samples to numpy cache file for fast reloading."""
+    actual_path = path if path.endswith(".npz") else path + ".npz"
+    n = len(samples)
+
+    print(f"Saving cache ({n:,} positions)...", file=sys.stderr)
+    t0 = time.time()
+    encoded = np.array([s["encoded"] for s in samples], dtype=np.uint8)
+    values = np.array([s["value"] for s in samples], dtype=np.float32)
+    policies = np.array([s["move_index"] for s in samples], dtype=np.int32)
+
+    arrays = dict(encoded=encoded, values=values, policies=policies)
+    if game_slices is not None:
+        arrays["game_slices"] = np.array(game_slices, dtype=np.int64)
+
+    np.savez(path, **arrays)
+    size_mb = os.path.getsize(actual_path) / (1024 * 1024)
+    elapsed = time.time() - t0
+    print(f"  Saved: {actual_path} ({size_mb:.0f} MB, {elapsed:.1f}s)", file=sys.stderr)
+
+
+def load_cache(path, torch_mod):
+    """Load cached numpy data and convert to CPU tensors.
+
+    Returns ((board_t, hand_t, ..., value_t, policy_t), game_slices)
+    or (None, None) if cache doesn't exist.
+    """
+    actual_path = path if path.endswith(".npz") else path + ".npz"
+    if not os.path.exists(actual_path):
+        return None, None
+
+    print(f"Loading cache: {actual_path}...", end="", file=sys.stderr, flush=True)
+    t0 = time.time()
+    data = np.load(actual_path)
+    print(f" {time.time() - t0:.1f}s", file=sys.stderr)
+
+    encoded = data["encoded"]
+    n = len(encoded)
+    print(f"  {n:,} positions, converting to tensors...", end="", file=sys.stderr, flush=True)
+    t0 = time.time()
+
+    board_t, hand_t, side_t, own_atk_t, opp_atk_t = _encoded_np_to_tensors(
+        encoded, n, torch_mod)
+    del encoded
+
+    value_t = torch_mod.from_numpy(data["values"].copy())
+    policy_t = torch_mod.from_numpy(data["policies"].astype(np.int64))
+    print(f" {time.time() - t0:.1f}s", file=sys.stderr)
+
+    game_slices = None
+    if "game_slices" in data:
+        gs = data["game_slices"]
+        game_slices = [(int(gs[i, 0]), int(gs[i, 1])) for i in range(len(gs))]
+
+    return (board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t), game_slices
+
+
 def evaluate_positions(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t,
                        torch_mod, eval_batch=8192):
-    """Batch inference on all positions, returns value predictions on CPU."""
+    """Batch inference on all positions (CPU tensors), returns value predictions on CPU."""
     model.eval()
+    dev = next(model.parameters()).device
     n = board_t.shape[0]
     evals = torch_mod.zeros(n)
     total = (n + eval_batch - 1) // eval_batch
@@ -314,20 +372,22 @@ def evaluate_positions(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t,
         for start in tqdm(range(0, n, eval_batch), desc="  Evaluating",
                           total=total, file=sys.stderr, dynamic_ncols=True):
             end = min(start + eval_batch, n)
-            v, _ = model(board_t[start:end], hand_t[start:end], side_t[start:end],
-                         own_atk_t[start:end], opp_atk_t[start:end])
+            v, _ = model(
+                board_t[start:end].to(dev), hand_t[start:end].to(dev),
+                side_t[start:end].to(dev), own_atk_t[start:end].to(dev),
+                opp_atk_t[start:end].to(dev))
             evals[start:end] = v.cpu()
     return evals
 
 
 def compute_bootstrap_labels(evals, game_result_t, game_slices, torch_mod,
-                              device, blend=0.5, drop_margin=0.8):
+                              blend=0.5, drop_margin=0.8):
     """Compute improved value labels and policy weights from eval_drop.
 
     eval_drop[i] = evals[i] + evals[i+1] for consecutive positions in same game.
     Positive eval_drop = the mover made the position worse (blunder).
 
-    Returns (new_value_t, policy_weight_t) on device.
+    Returns (new_value_t, policy_weight_t) as CPU tensors.
     """
     n = len(evals)
 
@@ -338,7 +398,7 @@ def compute_bootstrap_labels(evals, game_result_t, game_slices, torch_mod,
         if end > 0:
             eval_drop[end - 1] = 0.0
 
-    new_value = blend * game_result_t.cpu() + (1.0 - blend) * evals
+    new_value = blend * game_result_t + (1.0 - blend) * evals
     new_value = new_value.clamp(-1.0, 1.0)
 
     policy_weight = torch_mod.clamp(
@@ -353,7 +413,7 @@ def compute_bootstrap_labels(evals, game_result_t, game_slices, torch_mod,
           f"[{policy_weight.min():.3f}, {policy_weight.max():.3f}]",
           file=sys.stderr)
 
-    return new_value.to(device), policy_weight.to(device)
+    return new_value, policy_weight
 
 
 def train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t,
@@ -406,18 +466,26 @@ def train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, p
 
     for epoch in range(epochs):
         t0 = time.time()
-        perm = torch_mod.randperm(n, device=device)
+        perm = torch_mod.randperm(n)
         total_loss_v = 0.0
         total_loss_p = 0.0
         batches = 0
 
         for start in range(0, n, batch_size):
             idx = perm[start:start + batch_size]
-            pred_v, pred_p = model(board_t[idx], hand_t[idx], side_t[idx],
-                                   own_atk_t[idx], opp_atk_t[idx])
-            loss_v = value_loss_fn(pred_v, value_t[idx])
-            per_sample_p = policy_loss_fn(pred_p, policy_t[idx])
-            loss_p = (per_sample_p * policy_weight_t[idx]).mean()
+            b_board = board_t[idx].to(device, non_blocking=True)
+            b_hand = hand_t[idx].to(device, non_blocking=True)
+            b_side = side_t[idx].to(device, non_blocking=True)
+            b_own = own_atk_t[idx].to(device, non_blocking=True)
+            b_opp = opp_atk_t[idx].to(device, non_blocking=True)
+            b_val = value_t[idx].to(device, non_blocking=True)
+            b_pol = policy_t[idx].to(device, non_blocking=True)
+            b_pw = policy_weight_t[idx].to(device, non_blocking=True)
+
+            pred_v, pred_p = model(b_board, b_hand, b_side, b_own, b_opp)
+            loss_v = value_loss_fn(pred_v, b_val)
+            per_sample_p = policy_loss_fn(pred_p, b_pol)
+            loss_p = (per_sample_p * b_pw).mean()
             loss = loss_v + loss_p
 
             optimizer.zero_grad(set_to_none=True)
@@ -452,10 +520,12 @@ def train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, p
 
 def main():
     parser = argparse.ArgumentParser(description="Train Transformer from CSA kifu")
-    parser.add_argument("--kifu", required=True, help="Root directory of CSA kifu files")
+    parser.add_argument("--kifu", default="", help="Root directory of CSA kifu files")
     parser.add_argument("--model", default="nn_model.pt", help="Model save path")
     parser.add_argument("--output", default="nn_model.onnx",
                         help="ONNX output path (default: nn_model.onnx)")
+    parser.add_argument("--cache", default="",
+                        help="Cache file (.npz) for parsed kifu data")
     parser.add_argument("--device", default="auto", help="auto|cuda|cpu")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=1024)
@@ -491,29 +561,37 @@ def main():
     print(f"Device: {device}", file=sys.stderr)
 
     bootstrap = args.bootstrap_rounds > 0
+    game_slices = None
 
-    # Load CSA kifu
-    if bootstrap:
-        samples, game_slices = load_games_grouped(
-            Path(args.kifu), args.min_rate, args.max_games, args.parse_workers)
-    else:
-        samples = load_games(
-            Path(args.kifu), args.min_rate, args.max_games,
-            args.sample_rate, args.opening_n, args.endgame_n,
-            args.parse_workers,
-        )
-        game_slices = None
-    if not samples:
-        print("No samples loaded. Check kifu path and filters.", file=sys.stderr)
-        return 1
+    # Load data: from cache or parse kifu
+    cached = False
+    if args.cache:
+        result, game_slices = load_cache(args.cache, torch_mod)
+        if result is not None:
+            board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t = result
+            cached = True
 
-    if not bootstrap:
-        random.shuffle(samples)
-
-    # Convert to tensors
-    board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t = samples_to_tensors(
-        samples, torch_mod, device, args.tensor_threads)
-    del samples
+    if not cached:
+        if not args.kifu:
+            print("ERROR: --kifu required (no cache available)", file=sys.stderr)
+            return 1
+        if bootstrap or args.cache:
+            samples, game_slices = load_games_grouped(
+                Path(args.kifu), args.min_rate, args.max_games, args.parse_workers)
+        else:
+            samples = load_games(
+                Path(args.kifu), args.min_rate, args.max_games,
+                args.sample_rate, args.opening_n, args.endgame_n,
+                args.parse_workers)
+            game_slices = None
+        if not samples:
+            print("No samples loaded. Check kifu path and filters.", file=sys.stderr)
+            return 1
+        if args.cache:
+            save_cache(args.cache, samples, game_slices)
+        board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t = samples_to_tensors(
+            samples, torch_mod, tensor_threads=args.tensor_threads)
+        del samples
 
     # Build/load model
     model_path = Path(args.model)
@@ -546,7 +624,7 @@ def main():
                 evals = evaluate_positions(model, board_t, hand_t, side_t,
                                            own_atk_t, opp_atk_t, torch_mod)
                 value_t, pw_t = compute_bootstrap_labels(
-                    evals, game_result_t, game_slices, torch_mod, device,
+                    evals, game_result_t, game_slices, torch_mod,
                     blend=args.bootstrap_blend, drop_margin=args.drop_margin)
                 del evals
             else:

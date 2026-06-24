@@ -1,6 +1,6 @@
 # 学習パイプライン
 
-4 つのエンジンが Floodgate CSA 棋譜から学習できます。
+5 つのエンジンが Floodgate CSA 棋譜から学習できます。
 入力は共通、各エンジン専用のスクリプトがパース→学習→モデル保存を行います。
 
 ---
@@ -16,7 +16,11 @@ Floodgate CSA 棋譜 (kifu/floodgate/*.csa)
         │
         ├── train_nnue.py   ──→ nnue.bin                 (NNUE 評価)
         │
-        └── train.py        ──→ nn_model.pt + nn_model.onnx (MCTS Transformer)
+        ├── train.py        ──→ nn_model.pt + nn_model.onnx (MCTS Transformer)
+        │
+        └── train_alpha.py  ──→ alpha_model.pt + alpha_model.onnx (Alpha ResNet-SE)
+                │
+                └── alpha_train_loop.py ──→ 自己対局 RL ループで継続強化
 ```
 
 | エンジン | 学習スクリプト | 出力ファイル | 評価方式 |
@@ -25,6 +29,7 @@ Floodgate CSA 棋譜 (kifu/floodgate/*.csa)
 | Classic (αβ探索 MLP) | `train_mlp.py` | `mlp.weights` | MLP (98→128→64→1) |
 | NNUE (αβ探索) | `train_nnue.py` | `nnue.bin` | NNUE (2344→256→64→32→1) |
 | MCTS (Transformer) | `train.py` | `nn_model.onnx` | Transformer (方策+価値) |
+| Alpha (改良MCTS) | `train_alpha.py` | `alpha_model.onnx` | ResNet-SE (方策+WDL価値) |
 
 ---
 
@@ -200,6 +205,8 @@ cp nnue.bin build/Release/nnue.bin
 Transformer で方策（次の一手の確率分布）と価値（勝率）を同時に学習します。
 学習完了後に自動で ONNX 形式にエクスポートされます。
 
+データは CPU に保持し、バッチごとに GPU に転送する方式のため、VRAM が小さい GPU (12GB 等) でも大規模データセットで学習可能です。
+
 ### クイックスタート
 
 ```sh
@@ -208,9 +215,36 @@ python tools/train.py \
   --model nn_model.pt
 ```
 
+### キャッシュ付き学習 (推奨)
+
+棋譜パース (数分) とテンソル変換 (数十秒) の結果を `.npz` ファイルにキャッシュできます。
+2回目以降はキャッシュから数秒でロードされます。
+
+```sh
+# 初回: パース + キャッシュ保存
+python tools/train.py --kifu kifu/floodgate --cache kifu_cache.npz --epochs 10
+
+# 2回目以降: キャッシュからロード (--kifu 不要)
+python tools/train.py --cache kifu_cache.npz --epochs 10
+
+# 別フィルタには別キャッシュを使う
+python tools/train.py --kifu kifu/floodgate --min-rate 2000 --cache cache_2000.npz
+```
+
+`--cache` 指定時は全局面をサンプリングなしでキャッシュするため、bootstrap 学習にもそのまま使えます。
+
+### ブートストラップ学習
+
+学習済みモデル自身の評価値から悪手 (eval_drop) を検出し、ラベルを改善して再学習するセルフ評価方式です。
+
+```sh
+python tools/train.py --cache kifu_cache.npz --epochs 10 \
+  --bootstrap-rounds 2 --bootstrap-blend 0.5 --drop-margin 0.8
+```
+
 ### 内部の流れ
 
-1. CSA 棋譜をパースし、盤面を 258 整数にエンコード
+1. CSA 棋譜をパースし、盤面を 258 整数にエンコード (numpy 経由で高速変換)
 2. 方策ラベル: 正解手の policy インデックス (0-2186)
 3. 価値ラベル: 指し手側の勝敗 (+1/-1)
 4. Transformer (d=128, 4層, 8ヘッド) を CrossEntropy + MSE で学習
@@ -221,7 +255,8 @@ python tools/train.py \
 
 | オプション | デフォルト | 説明 |
 |-----------|----------|------|
-| `--kifu` | (必須) | CSA 棋譜のルートディレクトリ |
+| `--kifu` | - | CSA 棋譜のルートディレクトリ (`--cache` 未使用時は必須) |
+| `--cache` | - | パース済みデータのキャッシュファイル (.npz) |
 | `--model` | `nn_model.pt` | モデルの保存先 |
 | `--output` | `nn_model.onnx` | ONNX 出力先 |
 | `--device` | `auto` | `auto` / `cuda` / `cpu` |
@@ -234,6 +269,9 @@ python tools/train.py \
 | `--opening-n` | 40 | 序盤 N 手は必ず使用 |
 | `--endgame-n` | 40 | 終盤 N 手は必ず使用 |
 | `--resume` | - | 既存モデルから再開 |
+| `--bootstrap-rounds` | 0 | セルフ評価ブートストラップ回数 (0=無効) |
+| `--bootstrap-blend` | 0.5 | 勝敗とモデル評価値の混合比 (1=勝敗のみ) |
+| `--drop-margin` | 0.8 | eval_drop がこの値で policy weight が最小になる |
 
 ### バージョン管理付き学習ループ (`train_loop.py`)
 
@@ -276,6 +314,199 @@ python tools/export_onnx.py --model nn_model.pt --output nn_model.onnx --verify
 
 ---
 
+## 5. Alpha エンジン (`kishi-to-alpha`)
+
+AlphaZero 方式の ResNet-SE + 改良 MCTS エンジンです。
+教師あり学習 (SL) で初期モデルを作り、自己対局強化学習 (RL) で継続的に強化します。
+
+### アーキテクチャ
+
+```text
+入力: [B, 45, 9, 9] float32
+  28ch: 駒面 (14 駒種 × 2 色, one-hot)
+  14ch: 持ち駒 (7 種 × 2 色, count/max 正規化)
+   2ch: 利き数 (先手/後手, /8.0)
+   1ch: 手番 (先手=1.0, 後手=0.0)
+
+Initial Conv(45→192) → BN → ReLU
+× 15 Residual Blocks:
+  Conv(192→192) → BN → ReLU → Conv(192→192) → BN → SE(192→48→192) → Skip → ReLU
+
+Value Head (WDL 3 クラス):
+  Conv(192→1) → BN → ReLU → FC(81→256) → ReLU → FC(256→3)
+
+Policy Head:
+  Conv(192→27) → Flatten → 2187 logits (81 マス × 27 チャンネル)
+```
+
+- パラメータ数: 約 7-8M
+- WDL (Win/Draw/Loss) 3 クラス出力。期待値 = wdl[0] - wdl[2]
+- Policy: 既存と同じ 81×27=2187 エンコーディング
+- SE (Squeeze-and-Excitation) ブロックにより、チャンネル間の相互作用を動的に調整
+
+### ステップ 1: 教師あり学習 (SL)
+
+Floodgate 棋譜から初期モデルを学習します。
+
+```sh
+python tools/train_alpha.py \
+  --kifu kifu/floodgate \
+  --model alpha_model.pt \
+  --output alpha_model.onnx \
+  --min-rate 3000 \
+  --epochs 20
+```
+
+GPU が 2 枚ある場合は自動で DataParallel になります。
+
+### ステップ 2: 自己対局 RL
+
+#### 手動実行
+
+```sh
+# 1. 自己対局でデータ生成
+python tools/alpha_self_play.py \
+  --engine build/Release/kishi-to-alpha.exe \
+  --model alpha_model.onnx \
+  --games 200 --simulations 400 \
+  --output selfplay_001.npz
+
+# 2. 自己対局データから学習
+python tools/train_alpha_rl.py \
+  --data selfplay_001.npz selfplay_002.npz \
+  --model alpha_model.pt \
+  --output alpha_model.onnx
+```
+
+#### 自動 RL ループ (推奨)
+
+自己対局→学習→評価→ゲートの繰り返しを自動化します。
+
+```sh
+python tools/alpha_train_loop.py \
+  --engine build/Release/kishi-to-alpha.exe \
+  --iterations 100
+```
+
+1 イテレーションの流れ:
+
+1. 現モデルで自己対局 200 局 (400 sim/手)
+2. リプレイバッファから学習 (直近 200 万局面, FIFO)
+3. 新モデル vs 現ベストで 20 局評価
+4. 勝率 55% 以上で昇格、以下なら棄却
+5. 繰り返し
+
+ログは `alpha_rl_work/train_log.jsonl` に記録されます。
+
+### ステップ 3: CPU 用モデルの作成
+
+GPU がない環境向けに、軽量モデルと INT8 量子化の 2 つの手段があります。
+
+#### 知識蒸留 (小型モデル)
+
+フルモデル (15 ブロック, 192ch) を教師として、小型モデル (10 ブロック, 128ch) を学習します。
+
+```sh
+python tools/train_alpha_small.py \
+  --teacher alpha_model.pt \
+  --data selfplay_*.npz \
+  --output alpha_model_small
+```
+
+- 温度付きソフトターゲット (T=3.0) で教師の出力分布を模倣
+- ソフト:ハード = 70%:30% のブレンド比率
+- 圧縮率: 約 3x (7-8M → 2-3M パラメータ)
+
+#### INT8 量子化
+
+```sh
+python tools/quantize_alpha.py \
+  --model alpha_model.onnx \
+  --output alpha_model_int8.onnx \
+  --calibration-data kifu_cache.npz \
+  --verify
+```
+
+- `--verify` で元モデルとの精度比較を実行
+- Policy top-1 一致率 98%+、Value MAE +0.02 以内が目標
+
+### ステップ 4: 定跡生成
+
+高シミュレーションの MCTS で序盤を解析し、定跡ファイルを生成します。
+
+```sh
+python tools/gen_alpha_book.py \
+  --engine build/Release/kishi-to-alpha.exe \
+  --plies 12 --simulations 6400 --branches 3 \
+  --output book.txt
+```
+
+BFS で上位 3 手を分岐・展開し、訪問数を定跡の重みとして出力します。
+
+### オプション一覧
+
+#### `train_alpha.py` (教師あり学習)
+
+| オプション | デフォルト | 説明 |
+|-----------|----------|------|
+| `--kifu` | - | CSA 棋譜のルートディレクトリ (`--cache` 未使用時は必須) |
+| `--cache` | - | パース済みデータのキャッシュファイル (.npz) |
+| `--model` | `alpha_model.pt` | モデルの保存先 |
+| `--output` | `alpha_model.onnx` | ONNX 出力先 |
+| `--channels` | 192 | ResNet チャンネル数 |
+| `--blocks` | 15 | Residual ブロック数 |
+| `--epochs` | 20 | エポック数 |
+| `--batch-size` | 1024 | バッチサイズ |
+| `--lr` | 2e-4 | 学習率 |
+| `--min-rate` | 2500 | 最低レーティング |
+| `--device` | `auto` | `auto` / `cuda` / `cpu` |
+
+#### `train_alpha_rl.py` (RL 学習)
+
+| オプション | デフォルト | 説明 |
+| ---------- | ---------- | ---- |
+| `--data` | (必須) | 自己対局 .npz ファイル (複数指定可) |
+| `--model` | `alpha_model.pt` | モデルパス (ロード・保存兼用) |
+| `--output` | `alpha_model.onnx` | ONNX 出力先 |
+| `--buffer-size` | 2000000 | リプレイバッファサイズ |
+| `--epochs` | 5 | エポック数 |
+| `--batch-size` | 1024 | バッチサイズ |
+| `--lr` | 1e-4 | 学習率 |
+
+#### `alpha_train_loop.py` (RL ループ)
+
+| オプション | デフォルト | 説明 |
+| ---------- | ---------- | ---- |
+| `--engine` | (必須) | `kishi-to-alpha` 実行ファイル |
+| `--work-dir` | `alpha_rl_work` | 作業ディレクトリ |
+| `--iterations` | 100 | RL イテレーション数 |
+| `--selfplay-games` | 200 | 自己対局数 |
+| `--selfplay-sims` | 400 | 自己対局時シミュレーション数 |
+| `--eval-games` | 20 | 評価対局数 |
+| `--skip-eval` | - | 評価をスキップ (常に昇格) |
+| `--resume` | - | 既存作業ディレクトリから再開 |
+
+### モデルの配備
+
+```sh
+# GPU 推論用 (フルモデル)
+cp alpha_model.onnx build/Release/alpha_model.onnx
+
+# CPU 推論用 (小型モデル)
+cp alpha_model_small.onnx build/Release/alpha_model.onnx
+
+# CPU 推論用 (INT8 量子化)
+cp alpha_model_int8.onnx build/Release/alpha_model.onnx
+```
+
+### Alpha 用 ONNX エクスポート
+
+```sh
+python tools/export_alpha_onnx.py --model alpha_model.pt --output alpha_model.onnx --verify
+```
+
+---
+
 ## 共通ツール
 
 | ファイル | 役割 |
@@ -283,8 +514,14 @@ python tools/export_onnx.py --model nn_model.pt --output nn_model.onnx --verify
 | `tools/csa_parser.py` | Floodgate CSA 棋譜パーサー (全スクリプト共通) |
 | `tools/export_mlp.py` | PyTorch MLP → テキスト重みファイル変換 |
 | `tools/export_onnx.py` | PyTorch Transformer → ONNX 変換 |
+| `tools/export_alpha_onnx.py` | PyTorch ResNet-SE → ONNX 変換 (Alpha 用) |
 | `tools/self_play.py` | USI 自己対戦 (MCTS 用) |
+| `tools/alpha_self_play.py` | 学習データ生成付き自己対局 (Alpha 用) |
 | `tools/train_loop.py` | バージョン管理付き学習ループ (MCTS 用) |
+| `tools/alpha_train_loop.py` | RL 学習ループ (Alpha 用) |
+| `tools/quantize_alpha.py` | ONNX INT8 静的量子化 (Alpha 用) |
+| `tools/train_alpha_small.py` | 知識蒸留で軽量モデル作成 (Alpha 用) |
+| `tools/gen_alpha_book.py` | MCTS 解析ベースの定跡生成 (Alpha 用) |
 
 ---
 

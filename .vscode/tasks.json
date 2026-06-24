@@ -1,0 +1,51 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Remote: Train Bootstrap",
+            "type": "process",
+            "command": "powershell",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train.ps1",
+                     "--cache", "kifu_cache.npz", "--epochs", "10","--batch-size","4096",
+                     "--bootstrap-rounds", "2", "--bootstrap-blend", "0.5", "--drop-margin", "0.8"],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "Remote: Train (custom)",
+            "type": "process",
+            "command": "powershell",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train.ps1",
+                     "${input:trainArgs}"],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "Remote: Init Cache (初回のみ)",
+            "type": "process",
+            "command": "powershell",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train.ps1",
+                     "--kifu", "kifu/floodgate", "--cache", "kifu_cache.npz", "--epochs", "1"],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "Local: Build Classic",
+            "type": "shell",
+            "command": "cmake --build build --config Release",
+            "group": "build",
+            "problemMatcher": "$msCompile"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "trainArgs",
+            "type": "promptString",
+            "description": "train.py の引数 (例: --cache kifu_cache.npz --epochs 20)",
+            "default": "--cache kifu_cache.npz --epochs 10"
+        }
+    ]
+}

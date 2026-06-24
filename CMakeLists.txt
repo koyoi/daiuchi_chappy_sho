@@ -119,3 +119,31 @@ add_custom_command(TARGET kishi-to POST_BUILD
         "${CMAKE_CURRENT_SOURCE_DIR}/tools/nn_eval.py"
         "$<TARGET_FILE_DIR:kishi-to>/tools/nn_eval.py"
 )
+
+# --- Alphaエンジン (ResNet-SE + 改良MCTS) ---
+set(ALPHA_SOURCES
+    src/alpha_mcts.cpp
+    src/alpha_engine.cpp
+    src/mate_solver.cpp
+    src/opening_book.cpp
+    src/alpha_usi_protocol.cpp
+    src/alpha_main.cpp
+)
+
+if(USE_ONNXRUNTIME)
+    if(ONNXRUNTIME_LIB AND ONNXRUNTIME_INCLUDE)
+        list(APPEND ALPHA_SOURCES src/alpha_onnx_inference.cpp)
+
+        add_executable(kishi-to-alpha ${ALPHA_SOURCES})
+        target_link_libraries(kishi-to-alpha PRIVATE shogi_core Threads::Threads)
+        target_compile_features(kishi-to-alpha PRIVATE cxx_std_17)
+        target_compile_definitions(kishi-to-alpha PRIVATE HAS_ONNXRUNTIME=1)
+        target_include_directories(kishi-to-alpha PRIVATE ${ONNXRUNTIME_INCLUDE})
+        target_link_libraries(kishi-to-alpha PRIVATE ${ONNXRUNTIME_LIB})
+        if(MSVC)
+            target_compile_options(kishi-to-alpha PRIVATE /W4 /permissive- /utf-8)
+        else()
+            target_compile_options(kishi-to-alpha PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+    endif()
+endif()

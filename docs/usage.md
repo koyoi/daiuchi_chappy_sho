@@ -12,6 +12,7 @@ ShogiGUI か将棋所に USI エンジンとして登録するのが最も簡単
 ```text
 build\Release\kishi-to-classic.exe   (Classic αβ探索)
 build\Release\kishi-to.exe           (MCTS + Transformer)
+build\Release\kishi-to-alpha.exe     (Alpha ResNet-SE + 改良MCTS)
 ```
 
 エンジン起動時に作業ディレクトリを exe のある場所へ移すため、重みファイルやスクリプトは exe 基準の相対パスで解決されます。
@@ -30,6 +31,16 @@ MLP 評価を使う場合は、exe と同じディレクトリに `mlp.weights` 
 - `tools/nn_eval.py` — 推論サーバースクリプト
 
 Python + PyTorch がインストールされた環境が必要です。Python のパスは USI オプション `NNPython` で指定できます。
+
+### Alpha エンジンの準備
+
+`kishi-to-alpha.exe` を使うには、exe と同じディレクトリに以下を配置します:
+
+- `alpha_model.onnx` — 学習済み ResNet-SE モデル（[学習パイプライン](training.md) で作成）
+
+ONNX Runtime で推論するため、Python は不要です。ビルド時に `USE_ONNXRUNTIME=ON` と ONNX Runtime SDK が必要です。
+
+GPU 推論 (CUDA) と CPU 推論の両方に対応しています。USI オプション `NNDevice` で切り替えます。CPU 用には INT8 量子化モデルや知識蒸留による小型モデルも利用可能です（[学習パイプライン](training.md) 参照）。
 
 ### 自己対戦時の注意 (Classic)
 
@@ -109,6 +120,31 @@ setoption name NNDevice value auto|cuda|cpu
 - `NNModel` — Transformer モデルファイルのパス。
 - `NNDevice` — `auto` で CUDA があれば GPU、なければ CPU。
 
+### Alpha エンジンのオプション
+
+```text
+setoption name MaxMoveTimeMs value 50..600000
+setoption name MctsSimulations value 1..100000
+setoption name NNModel value alpha_model.onnx
+setoption name NNDevice value auto|cuda|cpu
+setoption name MctsBatchSize value 1..64
+setoption name FPUReduction value 0..100
+setoption name TemperatureDropMove value 0..200
+setoption name Book value true|false
+```
+
+- `MctsSimulations` — 1 手あたりの MCTS シミュレーション回数（デフォルト 1600）。
+- `NNModel` — ResNet-SE モデルファイルのパス（デフォルト `alpha_model.onnx`）。
+- `NNDevice` — `auto` で CUDA があれば GPU、なければ CPU。
+- `MctsBatchSize` — NN 推論のバッチサイズ（デフォルト 16）。
+- `FPUReduction` — First Play Urgency 減算値 ×100（デフォルト 20 = 0.20）。未訪問ノードの Q を `parentQ - FPU` に設定。
+- `TemperatureDropMove` — この手数以降は温度を 0 に下げて argmax 選択に切り替え（デフォルト 30）。0 で常時 argmax。
+- `Book` — 定跡使用の有無（デフォルト `true`）。
+
+Alpha エンジン固有のコマンド:
+
+- `getvisits` — 直前の探索の各手の訪問回数を出力（自己対局データ生成用）。形式: `visits 7g7f:1200:42 3c3d:300:15 ...`
+
 ---
 
 ## CSA プロトコル (Classic のみ)
@@ -140,3 +176,6 @@ Classic エンジンは CSA モードにも対応しています。
 | 秒読み 30 秒以上 | Classic: `HeavyEvaluation=true` |
 | 1 手 1〜3 秒 | MCTS: `MctsSimulations=200` |
 | 1 手 5 秒以上 | MCTS: `MctsSimulations=800`（デフォルト） |
+| 1 手 3〜5 秒 | Alpha: `MctsSimulations=800` |
+| 1 手 5 秒以上 | Alpha: `MctsSimulations=1600`（デフォルト） |
+| CPU 推論 | Alpha: INT8 量子化モデル + `MctsSimulations=400` |
