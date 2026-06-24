@@ -25,6 +25,19 @@ constexpr int L2Size = 32;
 int boardFeatureIndex(Color perspective, int pieceColor, PieceType type, int square);
 int handFeatureIndex(Color perspective, Color handColor, PieceType type, int count);
 
+struct Accumulator {
+    alignas(64) float black[L0Size];
+    alignas(64) float white[L0Size];
+    bool computed = false;
+};
+
+struct FeatureDelta {
+    int blackRemoved[4], blackAdded[4];
+    int whiteRemoved[4], whiteAdded[4];
+    int numBlackRemoved = 0, numBlackAdded = 0;
+    int numWhiteRemoved = 0, numWhiteAdded = 0;
+};
+
 } // namespace nnue
 
 class NNUENetwork {
@@ -36,6 +49,11 @@ public:
     bool save(const std::string& path) const;
     bool loaded() const { return loaded_; }
     void initRandom();
+
+    nnue::FeatureDelta computeMoveDelta(const Board& board, const Move& move) const;
+    void computeAccumulatorFull(const Board& board, nnue::Accumulator& acc) const;
+    void updateAccumulatorIncremental(const nnue::Accumulator& parent, const nnue::FeatureDelta& delta, nnue::Accumulator& child) const;
+    int evaluateFromAccumulator(const nnue::Accumulator& acc, Color perspective) const;
 
 private:
     void computeAccumulator(const std::vector<int>& activeFeatures, float* output) const;

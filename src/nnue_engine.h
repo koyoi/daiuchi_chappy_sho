@@ -54,7 +54,7 @@ private:
     void updateHistory(Color side, const Move& move, int depth, bool good) const;
     void storeCounterMove(Color side, const Move& prevMove, const Move& counterMove) const;
 
-    int eval(const Board& board, Color rootSide) const;
+    int eval(const Board& board, Color rootSide, int ply) const;
 
     struct TranspositionEntry {
         std::uint64_t key = 0;

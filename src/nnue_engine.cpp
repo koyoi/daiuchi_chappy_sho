@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -81,6 +82,9 @@ int chebyshevDistance(int left, int right) {
     return std::max(std::abs(fileOf(left) - fileOf(right)), std::abs(rankOf(left) - rankOf(right)));
 }
 
+constexpr int AccStackSize = 129;
+thread_local std::array<nnue::Accumulator, AccStackSize> accStack;
+
 } // namespace
 
 NNUEEngine::NNUEEngine()
@@ -90,7 +94,19 @@ NNUEEngine::NNUEEngine()
     threads_ = defaultThreadCount();
 }
 
-int NNUEEngine::eval(const Board& board, Color rootSide) const {
+int NNUEEngine::eval(const Board& board, Color rootSide, int ply) const {
+    if (ply >= 0 && ply < AccStackSize) {
+        auto& acc = accStack[ply];
+        if (!acc.computed) nnue_.computeAccumulatorFull(board, acc);
+        int incScore = nnue_.evaluateFromAccumulator(acc, rootSide);
+#ifndef NDEBUG
+        int fullScore = nnue_.evaluate(board, rootSide);
+        if (acc.computed && std::abs(incScore - fullScore) > 1) {
+            std::cerr << "NNUE mismatch at ply " << ply << ": inc=" << incScore << " full=" << fullScore << std::endl;
+        }
+#endif
+        return incScore;
+    }
     return nnue_.evaluate(board, rootSide);
 }
 
@@ -110,6 +126,8 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
     const int requestedMoveTime = limits.moveTimeMs > 0 ? limits.moveTimeMs : maxMoveTimeMs_;
     const int moveTime = std::clamp(requestedMoveTime, 50, 600000);
     deadline_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(moveTime);
+
+    nnue_.computeAccumulatorFull(board, accStack[0]);
 
     auto legal = generateLegalMoves(board, true);
     if (legal.empty()) {
@@ -189,8 +207,10 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
                 int runningAlpha = aspirationAlpha;
                 for (int i = 0; i < legal.size(); ++i) {
                     if (shouldStop()) break;
+                    auto delta = nnue_.computeMoveDelta(board, legal[i]);
                     Board next = board;
                     applyMove(next, legal[i]);
+                    nnue_.updateAccumulatorIncremental(accStack[0], delta, accStack[1]);
                     int sd = depth - 1;
                     if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) sd = std::max(0, depth - 3);
                     scores[i] = search(next, sd, 1, runningAlpha, aspirationBeta, rootSide, true, legal[i]);
@@ -202,11 +222,15 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
                 workers.reserve(workerCount);
                 for (int w = 0; w < workerCount; ++w) {
                     workers.emplace_back([&]() {
+                        accStack[0].computed = false;
+                        nnue_.computeAccumulatorFull(board, accStack[0]);
                         while (!shouldStop()) {
                             const int i = nextIndex.fetch_add(1);
                             if (i >= static_cast<int>(legal.size())) break;
+                            auto delta = nnue_.computeMoveDelta(board, legal[i]);
                             Board next = board;
                             applyMove(next, legal[i]);
+                            nnue_.updateAccumulatorIncremental(accStack[0], delta, accStack[1]);
                             int sd = depth - 1;
                             if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) sd = std::max(0, depth - 3);
                             const int la = sharedAlpha.load(std::memory_order_relaxed);
@@ -231,8 +255,10 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
             if (depthBest != std::numeric_limits<int>::min() && (depthBest <= aspirationAlpha || depthBest >= aspirationBeta)) {
                 int runningAlpha = -MateScore;
                 for (int i = 0; i < legal.size() && !shouldStop(); ++i) {
+                    auto delta = nnue_.computeMoveDelta(board, legal[i]);
                     Board next = board;
                     applyMove(next, legal[i]);
+                    nnue_.updateAccumulatorIncremental(accStack[0], delta, accStack[1]);
                     int sd = depth - 1;
                     if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) sd = std::max(0, depth - 3);
                     scores[i] = search(next, sd, 1, runningAlpha, MateScore, rootSide, true, legal[i]);
@@ -322,7 +348,7 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
 
 int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Color rootSide, bool allowNullMove, const Move& prevMove) const {
     nodes_.fetch_add(1);
-    if (shouldStop()) return eval(board, rootSide);
+    if (shouldStop()) return eval(board, rootSide, ply);
 
     const int alphaOriginal = alpha;
     const int betaOriginal = beta;
@@ -357,6 +383,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
     const bool maximizing = board.side == rootSide;
 
     if (allowNullMove && !inCheck && depth >= nmpMinDepth_ && ply > 0) {
+        if (ply + 1 < AccStackSize) accStack[ply + 1] = accStack[ply];
         NullMoveUndoInfo nullUndo;
         applyNullMove(board, nullUndo);
         const int nullVal = search(board, depth - 1 - nmpReduction_, ply + 1, alpha, beta, rootSide, false, Move{});
@@ -376,7 +403,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
 
     const bool canFutilityPrune = !inCheck && (depth == 1 || depth == 2);
     int staticEval = 0;
-    if (canFutilityPrune) staticEval = eval(board, rootSide);
+    if (canFutilityPrune) staticEval = eval(board, rootSide, ply);
     const int futilityMargin = depth == 1 ? futilityMargin1_ : futilityMargin2_;
 
     if (maximizing) {
@@ -392,8 +419,10 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
             const bool isCheck = givesCheck(board, move);
             if (canFutilityPrune && isQuiet && !isCheck && staticEval + futilityMargin <= alpha) { ++moveIndex; continue; }
 
+            auto delta = nnue_.computeMoveDelta(board, move);
             UndoInfo undo;
             applyMove(board, move, undo);
+            if (ply + 1 < AccStackSize) nnue_.updateAccumulatorIncremental(accStack[ply], delta, accStack[ply + 1]);
             const bool givesCheckNow = isKingAttacked(board, board.side);
             int extension = (givesCheckNow && ply < MaxPly - 10) ? 1 : 0;
             const int newDepth = depth - 1 + extension;
@@ -461,8 +490,10 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
         const bool isCheck = givesCheck(board, move);
         if (canFutilityPrune && isQuiet && !isCheck && staticEval - futilityMargin >= beta) { ++moveIndex; continue; }
 
+        auto delta = nnue_.computeMoveDelta(board, move);
         UndoInfo undo;
         applyMove(board, move, undo);
+        if (ply + 1 < AccStackSize) nnue_.updateAccumulatorIncremental(accStack[ply], delta, accStack[ply + 1]);
         const bool givesCheckNow = isKingAttacked(board, board.side);
         int extension = (givesCheckNow && ply < MaxPly - 10) ? 1 : 0;
         const int newDepth = depth - 1 + extension;
@@ -519,7 +550,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
 
 int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta, Color rootSide) const {
     nodes_.fetch_add(1);
-    if (shouldStop()) return eval(board, rootSide);
+    if (shouldStop()) return eval(board, rootSide, ply);
 
     auto legal = generateLegalMoves(board, true);
     if (legal.empty()) {
@@ -528,7 +559,7 @@ int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta
         return 0;
     }
 
-    int standPat = eval(board, rootSide);
+    int standPat = eval(board, rootSide, ply);
     if (depth <= 0) return standPat;
 
     const bool maximizing = board.side == rootSide;
@@ -548,8 +579,10 @@ int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta
                     if (depth < qCheckDepthMin_ || !givesCheck(board, move)) continue;
                 }
             }
+            auto delta = nnue_.computeMoveDelta(board, move);
             UndoInfo undo;
             applyMove(board, move, undo);
+            if (ply + 1 < AccStackSize) nnue_.updateAccumulatorIncremental(accStack[ply], delta, accStack[ply + 1]);
             best = std::max(best, quiescence(board, depth - 1, ply + 1, alpha, beta, rootSide));
             undoMove(board, move, undo);
             alpha = std::max(alpha, best);
@@ -570,8 +603,10 @@ int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta
                 if (depth < qCheckDepthMin_ || !givesCheck(board, move)) continue;
             }
         }
+        auto delta = nnue_.computeMoveDelta(board, move);
         UndoInfo undo;
         applyMove(board, move, undo);
+        if (ply + 1 < AccStackSize) nnue_.updateAccumulatorIncremental(accStack[ply], delta, accStack[ply + 1]);
         best = std::min(best, quiescence(board, depth - 1, ply + 1, alpha, beta, rootSide));
         undoMove(board, move, undo);
         beta = std::min(beta, best);

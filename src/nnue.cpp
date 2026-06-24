@@ -114,6 +114,123 @@ static std::vector<int> extractActiveFeatures(const Board& board, Color perspect
     return features;
 }
 
+nnue::FeatureDelta NNUENetwork::computeMoveDelta(const Board& board, const Move& move) const {
+    nnue::FeatureDelta delta{};
+    const Color mover = board.side;
+    const int moverColor = static_cast<int>(mover);
+
+    for (Color perspective : {Black, White}) {
+        int* removed = perspective == Black ? delta.blackRemoved : delta.whiteRemoved;
+        int* added = perspective == Black ? delta.blackAdded : delta.whiteAdded;
+        int& nRemoved = perspective == Black ? delta.numBlackRemoved : delta.numWhiteRemoved;
+        int& nAdded = perspective == Black ? delta.numBlackAdded : delta.numWhiteAdded;
+
+        if (move.isDrop()) {
+            added[nAdded++] = nnue::boardFeatureIndex(perspective, moverColor, move.drop, move.to);
+
+            const int oldCount = hand(board, mover)[move.drop];
+            int fi = nnue::handFeatureIndex(perspective, mover, move.drop, oldCount);
+            if (fi >= 0) removed[nRemoved++] = fi;
+            // newCount = oldCount - 1; if > 0, that feature stays active (cumulative)
+        } else {
+            removed[nRemoved++] = nnue::boardFeatureIndex(perspective, moverColor, move.piece, move.from);
+
+            PieceType finalType = move.promote ? promote(move.piece) : move.piece;
+            added[nAdded++] = nnue::boardFeatureIndex(perspective, moverColor, finalType, move.to);
+
+            int captured = board.squares[move.to];
+            if (captured != 0) {
+                int capColor = colorOf(captured);
+                PieceType capType = typeOf(captured);
+                removed[nRemoved++] = nnue::boardFeatureIndex(perspective, capColor, capType, move.to);
+
+                PieceType capBase = unpromote(capType);
+                const int oldCount = hand(board, mover)[capBase];
+                int newCount = oldCount + 1;
+                added[nAdded++] = nnue::handFeatureIndex(perspective, mover, capBase, newCount);
+
+                if (oldCount > 0) {
+                    // nothing to remove: cumulative encoding means count=oldCount stays active
+                }
+            }
+        }
+    }
+
+    return delta;
+}
+
+void NNUENetwork::computeAccumulatorFull(const Board& board, nnue::Accumulator& acc) const {
+    auto blackFeatures = extractActiveFeatures(board, Black);
+    auto whiteFeatures = extractActiveFeatures(board, White);
+    computeAccumulator(blackFeatures, acc.black);
+    computeAccumulator(whiteFeatures, acc.white);
+    acc.computed = true;
+}
+
+void NNUENetwork::updateAccumulatorIncremental(const nnue::Accumulator& parent, const nnue::FeatureDelta& delta, nnue::Accumulator& child) const {
+    std::copy(parent.black, parent.black + nnue::L0Size, child.black);
+    for (int i = 0; i < delta.numBlackRemoved; ++i) {
+        const int fi = delta.blackRemoved[i];
+        if (fi >= 0 && fi < nnue::InputDim)
+            for (int j = 0; j < nnue::L0Size; ++j) child.black[j] -= l0Weights_[fi][j];
+    }
+    for (int i = 0; i < delta.numBlackAdded; ++i) {
+        const int fi = delta.blackAdded[i];
+        if (fi >= 0 && fi < nnue::InputDim)
+            for (int j = 0; j < nnue::L0Size; ++j) child.black[j] += l0Weights_[fi][j];
+    }
+
+    std::copy(parent.white, parent.white + nnue::L0Size, child.white);
+    for (int i = 0; i < delta.numWhiteRemoved; ++i) {
+        const int fi = delta.whiteRemoved[i];
+        if (fi >= 0 && fi < nnue::InputDim)
+            for (int j = 0; j < nnue::L0Size; ++j) child.white[j] -= l0Weights_[fi][j];
+    }
+    for (int i = 0; i < delta.numWhiteAdded; ++i) {
+        const int fi = delta.whiteAdded[i];
+        if (fi >= 0 && fi < nnue::InputDim)
+            for (int j = 0; j < nnue::L0Size; ++j) child.white[j] += l0Weights_[fi][j];
+    }
+
+    child.computed = true;
+}
+
+int NNUENetwork::evaluateFromAccumulator(const nnue::Accumulator& acc, Color perspective) const {
+    float clampedBlack[nnue::L0Size], clampedWhite[nnue::L0Size];
+    for (int i = 0; i < nnue::L0Size; ++i) {
+        clampedBlack[i] = std::clamp(acc.black[i], 0.0f, 1.0f);
+        clampedWhite[i] = std::clamp(acc.white[i], 0.0f, 1.0f);
+    }
+
+    float concat[2 * nnue::L0Size];
+    if (perspective == Black) {
+        std::copy(clampedBlack, clampedBlack + nnue::L0Size, concat);
+        std::copy(clampedWhite, clampedWhite + nnue::L0Size, concat + nnue::L0Size);
+    } else {
+        std::copy(clampedWhite, clampedWhite + nnue::L0Size, concat);
+        std::copy(clampedBlack, clampedBlack + nnue::L0Size, concat + nnue::L0Size);
+    }
+
+    float h1[nnue::L1Size];
+    for (int j = 0; j < nnue::L1Size; ++j) {
+        float sum = l1Biases_[j];
+        for (int i = 0; i < 2 * nnue::L0Size; ++i) sum += concat[i] * l1Weights_[i][j];
+        h1[j] = std::clamp(sum, 0.0f, 1.0f);
+    }
+
+    float h2[nnue::L2Size];
+    for (int j = 0; j < nnue::L2Size; ++j) {
+        float sum = l2Biases_[j];
+        for (int i = 0; i < nnue::L1Size; ++i) sum += h1[i] * l2Weights_[i][j];
+        h2[j] = std::clamp(sum, 0.0f, 1.0f);
+    }
+
+    float output = l3Bias_;
+    for (int i = 0; i < nnue::L2Size; ++i) output += h2[i] * l3Weights_[i];
+
+    return static_cast<int>(output * 600.0f);
+}
+
 int NNUENetwork::evaluate(const Board& board, Color perspective) const {
     auto blackFeatures = extractActiveFeatures(board, Black);
     auto whiteFeatures = extractActiveFeatures(board, White);
