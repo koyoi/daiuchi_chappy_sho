@@ -1,0 +1,15 @@
+{"iteration": 1, "win_rate": 1.0, "promoted": true, "data_files": 1, "elapsed_sec": 489}
+{"iteration": 2, "win_rate": 0.35, "promoted": false, "data_files": 2, "elapsed_sec": 310}
+{"iteration": 3, "win_rate": 0.575, "promoted": true, "data_files": 3, "elapsed_sec": 362}
+{"iteration": 4, "win_rate": 0.3, "promoted": false, "data_files": 4, "elapsed_sec": 371}
+{"iteration": 5, "win_rate": 0.65, "promoted": true, "data_files": 5, "elapsed_sec": 452}
+{"iteration": 6, "win_rate": 0.625, "promoted": true, "data_files": 6, "elapsed_sec": 505}
+{"iteration": 7, "win_rate": 0.3, "promoted": false, "data_files": 7, "elapsed_sec": 498}
+{"iteration": 8, "win_rate": 0.4, "promoted": false, "data_files": 8, "elapsed_sec": 602}
+{"iteration": 9, "win_rate": 0.625, "promoted": true, "data_files": 9, "elapsed_sec": 632}
+{"iteration": 10, "win_rate": 0.5, "promoted": false, "data_files": 10, "elapsed_sec": 754}
+{"iteration": 11, "win_rate": 0.475, "promoted": false, "data_files": 11, "elapsed_sec": 786}
+{"iteration": 12, "win_rate": 0.45, "promoted": false, "data_files": 12, "elapsed_sec": 829}
+{"iteration": 13, "win_rate": 0.65, "promoted": true, "data_files": 13, "elapsed_sec": 882}
+{"iteration": 14, "win_rate": 0.5, "promoted": false, "data_files": 14, "elapsed_sec": 937}
+{"iteration": 15, "win_rate": 0.65, "promoted": true, "data_files": 15, "elapsed_sec": 1030}
