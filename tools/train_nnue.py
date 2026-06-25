@@ -10,6 +10,7 @@ Supports:
 - Sigmoid + cross-entropy loss (default) or MSE + tanh (legacy)
 - Eval bootstrapping: blend engine eval with game outcome
 - Mixed precision training (AMP) for GPU acceleration
+- EmbeddingBag for GPU-optimized sparse feature lookup
 
 Usage:
   python tools/train_nnue.py --kifu kifu/floodgate
@@ -356,95 +357,6 @@ class NNUEDataset(Dataset):
         return s["black_feats"], s["white_feats"], np.float32(side), np.float32(result)
 
 
-def _build_sparse(indices_list, batch_size):
-    """Build a sparse COO tensor from per-sample index lists using numpy vectorization."""
-    lengths = np.array([len(x) for x in indices_list], dtype=np.int64)
-    total = int(lengths.sum())
-    if total == 0:
-        return torch.sparse_coo_tensor(
-            torch.zeros(2, 0, dtype=torch.long), torch.zeros(0), (batch_size, INPUT_DIM)
-        )
-    rows = np.repeat(np.arange(batch_size, dtype=np.int64), lengths)
-    cols = np.concatenate([np.asarray(x, dtype=np.int64) for x in indices_list])
-    idx = torch.from_numpy(np.stack([rows, cols]))
-    val = torch.ones(total, dtype=torch.float32)
-    return torch.sparse_coo_tensor(idx, val, (batch_size, INPUT_DIM)).coalesce()
-
-
-def collate_sparse(batch):
-    black_indices_list, white_indices_list, sides, targets = zip(*batch)
-    batch_size = len(batch)
-    sides_t = torch.tensor(np.array(sides), dtype=torch.float32)
-    targets_t = torch.tensor(np.array(targets), dtype=torch.float32)
-    return (_build_sparse(black_indices_list, batch_size),
-            _build_sparse(white_indices_list, batch_size),
-            sides_t, targets_t)
-
-
-class NNUEModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.l0 = nn.Linear(INPUT_DIM, L0_SIZE)
-        self.l1 = nn.Linear(2 * L0_SIZE, L1_SIZE)
-        self.l2 = nn.Linear(L1_SIZE, L2_SIZE)
-        self.l3 = nn.Linear(L2_SIZE, 1)
-
-    def _apply_l0(self, x):
-        if x.is_sparse:
-            # sparse mm must run in float32 (not supported in float16)
-            with torch.amp.autocast("cuda", enabled=False):
-                w = self.l0.weight.float()
-                b = self.l0.bias.float()
-                return torch.sparse.mm(x.float(), w.t()) + b
-        return self.l0(x)
-
-    def forward(self, black_input, white_input, side):
-        # SCReLU: clamp(x, 0, 1)^2
-        acc_black = torch.clamp(self._apply_l0(black_input), 0.0, 1.0) ** 2
-        acc_white = torch.clamp(self._apply_l0(white_input), 0.0, 1.0) ** 2
-        is_black = (side > 0).unsqueeze(1).float()
-        own = acc_black * is_black + acc_white * (1.0 - is_black)
-        opp = acc_white * is_black + acc_black * (1.0 - is_black)
-        concat = torch.cat([own, opp], dim=1)
-        h1 = torch.clamp(self.l1(concat), 0.0, 1.0)
-        h2 = torch.clamp(self.l2(h1), 0.0, 1.0)
-        return self.l3(h2).squeeze(1)
-
-
-def sigmoid_loss(pred, target, scale=EVAL_SCALE):
-    """Sigmoid cross-entropy loss.
-
-    pred: raw network output (before sigmoid)
-    target: probability of side-to-move winning (0.0 or 1.0, or soft label 0..1)
-    """
-    scaled = pred / scale
-    return F.binary_cross_entropy_with_logits(scaled, target, reduction='mean')
-
-
-def bootstrap_labels(model, dataset, device, lambda_blend=0.5, batch_size=8192):
-    """Replace binary game outcomes with blended labels using model predictions."""
-    model.eval()
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
-                        collate_fn=collate_sparse, num_workers=0)
-    soft_labels = []
-    with torch.no_grad():
-        for black_sparse, white_sparse, side, target in tqdm(loader, desc="Bootstrapping"):
-            black_vec = black_sparse.to(device)
-            white_vec = white_sparse.to(device)
-            side_d = side.to(device)
-            raw_pred = model(black_vec, white_vec, side_d)
-            engine_prob = torch.sigmoid(raw_pred / EVAL_SCALE)
-            game_prob = (target + 1.0) / 2.0  # -1..+1 -> 0..1
-            blended = lambda_blend * engine_prob.cpu() + (1.0 - lambda_blend) * game_prob
-            soft_labels.append(blended)
-
-    soft_labels = torch.cat(soft_labels).numpy()
-    for i, s in enumerate(dataset.samples):
-        # Store as probability (0..1) for sigmoid loss
-        dataset.samples[i]["soft_label"] = float(soft_labels[i])
-    return dataset
-
-
 class NNUEDatasetWithSoftLabels(Dataset):
     def __init__(self, samples: List[dict]):
         self.samples = samples
@@ -463,20 +375,90 @@ class NNUEDatasetWithSoftLabels(Dataset):
         return s["black_feats"], s["white_feats"], np.float32(side), np.float32(label)
 
 
-def export_nnue_bin(model_or_module: nn.Module, path: str):
-    """Export trained model to NNU3 binary format.
+def _pack_indices(index_list):
+    """Pack per-sample index arrays into EmbeddingBag format (flat indices + offsets)."""
+    lengths = np.array([len(x) for x in index_list], dtype=np.int64)
+    total = int(lengths.sum())
+    if total == 0:
+        return torch.zeros(1, dtype=torch.long), torch.zeros(len(index_list), dtype=torch.long)
+    indices = np.concatenate([np.asarray(x, dtype=np.int64) for x in index_list])
+    offsets = np.empty(len(index_list), dtype=np.int64)
+    offsets[0] = 0
+    np.cumsum(lengths[:-1], out=offsets[1:])
+    return torch.from_numpy(indices), torch.from_numpy(offsets)
 
-    Unwraps DataParallel if needed.
-    """
+
+def collate_embag(batch):
+    """Collate function producing EmbeddingBag-format packed indices + offsets."""
+    black_list, white_list, sides, targets = zip(*batch)
+    b_idx, b_off = _pack_indices(black_list)
+    w_idx, w_off = _pack_indices(white_list)
+    sides_t = torch.tensor(np.array(sides), dtype=torch.float32)
+    targets_t = torch.tensor(np.array(targets), dtype=torch.float32)
+    return b_idx, b_off, w_idx, w_off, sides_t, targets_t
+
+
+class NNUEModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.l0 = nn.EmbeddingBag(INPUT_DIM, L0_SIZE, mode='sum', sparse=False)
+        self.l0_bias = nn.Parameter(torch.zeros(L0_SIZE))
+        self.l1 = nn.Linear(2 * L0_SIZE, L1_SIZE)
+        self.l2 = nn.Linear(L1_SIZE, L2_SIZE)
+        self.l3 = nn.Linear(L2_SIZE, 1)
+
+    def forward(self, b_idx, b_off, w_idx, w_off, side):
+        acc_black = torch.clamp(self.l0(b_idx, b_off) + self.l0_bias, 0.0, 1.0) ** 2
+        acc_white = torch.clamp(self.l0(w_idx, w_off) + self.l0_bias, 0.0, 1.0) ** 2
+        is_black = (side > 0).unsqueeze(1).float()
+        own = acc_black * is_black + acc_white * (1.0 - is_black)
+        opp = acc_white * is_black + acc_black * (1.0 - is_black)
+        concat = torch.cat([own, opp], dim=1)
+        h1 = torch.clamp(self.l1(concat), 0.0, 1.0)
+        h2 = torch.clamp(self.l2(h1), 0.0, 1.0)
+        return self.l3(h2).squeeze(1)
+
+
+def sigmoid_loss(pred, target, scale=EVAL_SCALE):
+    scaled = pred / scale
+    return F.binary_cross_entropy_with_logits(scaled, target, reduction='mean')
+
+
+def bootstrap_labels(model, dataset, device, lambda_blend=0.5, batch_size=8192):
+    """Replace binary game outcomes with blended labels using model predictions."""
+    model.eval()
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                        collate_fn=collate_embag, num_workers=0)
+    soft_labels = []
+    with torch.no_grad():
+        for b_idx, b_off, w_idx, w_off, side, target in tqdm(loader, desc="Bootstrapping"):
+            b_idx, b_off = b_idx.to(device), b_off.to(device)
+            w_idx, w_off = w_idx.to(device), w_off.to(device)
+            side_d = side.to(device)
+            raw_pred = model(b_idx, b_off, w_idx, w_off, side_d)
+            engine_prob = torch.sigmoid(raw_pred / EVAL_SCALE)
+            game_prob = (target + 1.0) / 2.0
+            blended = lambda_blend * engine_prob.cpu() + (1.0 - lambda_blend) * game_prob
+            soft_labels.append(blended)
+
+    soft_labels = torch.cat(soft_labels).numpy()
+    for i, s in enumerate(dataset.samples):
+        dataset.samples[i]["soft_label"] = float(soft_labels[i])
+    return dataset
+
+
+def export_nnue_bin(model_or_module: nn.Module, path: str):
+    """Export trained model to NNU4 binary format."""
     model = model_or_module.module if isinstance(model_or_module, nn.DataParallel) else model_or_module
 
     with open(path, "wb") as f:
         f.write(b"NNU4")
         f.write(struct.pack('<i', L0_SIZE))
-        w0 = model.l0.weight.data.t().cpu()
+        # EmbeddingBag.weight is [INPUT_DIM, L0_SIZE] — matches C++ layout directly
+        w0 = model.l0.weight.data.cpu()
         w0_q = (w0 * WEIGHT_SCALE).round().clamp(-32768, 32767).to(torch.int16)
         f.write(w0_q.numpy().tobytes())
-        b0 = model.l0.bias.data.cpu()
+        b0 = model.l0_bias.data.cpu()
         b0_q = (b0 * WEIGHT_SCALE).round().clamp(-2147483648, 2147483647).to(torch.int32)
         f.write(b0_q.numpy().tobytes())
         w1 = model.l1.weight.data.t().cpu().numpy()
@@ -488,6 +470,15 @@ def export_nnue_bin(model_or_module: nn.Module, path: str):
         f.write(model.l3.weight.data.squeeze(0).cpu().numpy().astype(np.float32).tobytes())
         f.write(model.l3.bias.data.cpu().numpy().astype(np.float32).tobytes())
     print(f"Exported NNU4 weights to {path}")
+
+
+def _load_state_dict_compat(model, state_dict):
+    """Load state dict with backward compatibility for old nn.Linear l0 format."""
+    if 'l0.weight' in state_dict and state_dict['l0.weight'].shape == (L0_SIZE, INPUT_DIM):
+        state_dict['l0.weight'] = state_dict['l0.weight'].t().contiguous()
+    if 'l0.bias' in state_dict and 'l0_bias' not in state_dict:
+        state_dict['l0_bias'] = state_dict.pop('l0.bias')
+    model.load_state_dict(state_dict, strict=False)
 
 
 def load_index(kifu_dir: str) -> list:
@@ -553,14 +544,16 @@ def main():
 
     model = NNUEModel().to(device)
     if args.resume and os.path.exists(args.resume):
-        model.load_state_dict(torch.load(args.resume, map_location=device, weights_only=True))
+        sd = torch.load(args.resume, map_location=device, weights_only=True)
+        _load_state_dict_compat(model, sd)
         print(f"Resumed from {args.resume}")
 
     # Eval bootstrapping
     use_sigmoid = (args.loss == "sigmoid")
     if args.bootstrap and os.path.exists(args.bootstrap):
         boot_model = NNUEModel().to(device)
-        boot_model.load_state_dict(torch.load(args.bootstrap, map_location=device, weights_only=True))
+        sd = torch.load(args.bootstrap, map_location=device, weights_only=True)
+        _load_state_dict_compat(boot_model, sd)
         print(f"Bootstrapping with model: {args.bootstrap} (lambda={args.lambda_blend})")
         boot_dataset = NNUEDatasetWithSoftLabels(all_samples)
         boot_dataset = bootstrap_labels(boot_model, boot_dataset, device,
@@ -577,23 +570,16 @@ def main():
             train_data = NNUEDataset(all_samples[:split])
             val_data = NNUEDataset(all_samples[split:])
 
-    # Note: DataParallel is not used because sparse tensors cannot be
-    # scattered across GPUs. The l0 layer uses sparse mm (170K sparse -> 512 dense)
-    # which is memory-efficient on a single GPU, and the remaining layers (l1-l3)
-    # are too small to benefit from parallelism.
-    if num_gpus > 1:
-        print(f"Note: {num_gpus} GPUs detected, using GPU 0 (sparse mm is single-GPU)")
-
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    dl_workers = 0 if sys.platform == "win32" else min(4, workers)
+    dl_workers = 0 if sys.platform == "win32" else min(8, workers)
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
-                              num_workers=dl_workers, pin_memory=False,
-                              collate_fn=collate_sparse)
+                              num_workers=dl_workers, pin_memory=device.type == "cuda",
+                              collate_fn=collate_embag, persistent_workers=dl_workers > 0)
     val_loader = DataLoader(val_data, batch_size=args.batch_size * 2, shuffle=False,
-                            num_workers=dl_workers, pin_memory=False,
-                            collate_fn=collate_sparse)
+                            num_workers=dl_workers, pin_memory=device.type == "cuda",
+                            collate_fn=collate_embag, persistent_workers=dl_workers > 0)
 
     if use_sigmoid:
         print(f"Loss: sigmoid cross-entropy (scale={EVAL_SCALE})")
@@ -611,14 +597,14 @@ def main():
         model.train()
         train_loss = 0.0
         train_n = 0
-        for black_sparse, white_sparse, side, target in tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}"):
-            black_vec = black_sparse.to(device)
-            white_vec = white_sparse.to(device)
+        for b_idx, b_off, w_idx, w_off, side, target in tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}"):
+            b_idx, b_off = b_idx.to(device), b_off.to(device)
+            w_idx, w_off = w_idx.to(device), w_off.to(device)
             side = side.to(device)
             target = target.to(device)
 
             with torch.amp.autocast("cuda", enabled=use_amp):
-                pred = model(black_vec, white_vec, side)
+                pred = model(b_idx, b_off, w_idx, w_off, side)
                 if use_sigmoid:
                     loss = sigmoid_loss(pred, target)
                 else:
@@ -640,13 +626,13 @@ def main():
         val_loss = 0.0
         val_n = 0
         with torch.no_grad():
-            for black_sparse, white_sparse, side, target in val_loader:
-                black_vec = black_sparse.to(device)
-                white_vec = white_sparse.to(device)
+            for b_idx, b_off, w_idx, w_off, side, target in val_loader:
+                b_idx, b_off = b_idx.to(device), b_off.to(device)
+                w_idx, w_off = w_idx.to(device), w_off.to(device)
                 side = side.to(device)
                 target = target.to(device)
                 with torch.amp.autocast("cuda", enabled=use_amp):
-                    pred = model(black_vec, white_vec, side)
+                    pred = model(b_idx, b_off, w_idx, w_off, side)
                     if use_sigmoid:
                         vloss = sigmoid_loss(pred, target)
                     else:
