@@ -76,6 +76,26 @@ Entry point (`main.cpp`) selects protocol → `usiLoop()` or `csaLoop()` → `Le
 - **alpha_engine** — `AlphaEngineWrapper` composes `AlphaOnnxInference`, `AlphaMCTSEngine`, `MateSolver`, and `OpeningBook`. `chooseMove()` flow: opening book → mate search (10% of time budget, max 200ms) → tsumero detection (1.5x simulation extension) → MCTS search. Stores `lastMCTSResult_` for self-play training data access via `getvisits` USI command.
 - **Training pipeline** — Two-phase: (1) Supervised learning from Floodgate R3000+ games via `train_alpha.py`, (2) Self-play RL via `alpha_train_loop.py` (200 games/iter at 400 sims → train on 2M-position replay buffer → evaluate 20 games → gate at 55% win rate). CPU deployment via INT8 quantization (`quantize_alpha.py`) or knowledge distillation to 10-block/128ch student (`train_alpha_small.py`).
 
+### NNUE Engine (Efficiently Updatable Neural Network)
+
+- **nnue** — `NNUENetwork` implements HalfKP evaluation with SCReLU activation. Input features: `kingSquare(81) × coloredPieceType(26) × pieceSquare(81)` = 170,586 board features + 76 hand features = 170,662 total (InputDim). Network: InputDim → L0(512) → 1 with SCReLU (`clamp(x,0,1)²`). Weights stored as int16 (L0) and int32 (L1). Accumulator (int16×512 per perspective) is updated incrementally via `FeatureDelta` — only changed features are added/removed. When a king moves, the corresponding perspective's accumulator is fully recomputed. Binary format: magic `NNU4` + int32 L0Size + L0 weights/biases + L1 weights/bias. SIMD-optimized: AVX2 (16-wide int16) or SSE4.1 (8-wide) for accumulator updates, SCReLU, and dot products. Scalar fallback when neither is available.
+- **nnue_engine** — `NNUEEngine` implements NegaMax alpha-beta search with:
+  - **Move ordering**: TT move (score 1M) > MVV-LVA captures (100K+) > killers (90K) > counter moves (85K) > history/continuation/drop history for quiets. Captures also scored by capture history.
+  - **Late Move Reduction (LMR)**: Table-based `R = 0.75 + ln(depth) × ln(moveIndex) / 2.25`. History-adjusted: R reduced for moves with history > 2000, increased for history < -2000.
+  - **Singular Extension**: At depth ≥ 8 (configurable), if TT move's score is far above alternatives (verified by re-search with `beta = ttScore - 2*depth` excluding the TT move), extend search by 1 ply.
+  - **Null Move Pruning**: At depth ≥ 3 with non-king material, skip a move and search with reduced depth (R=3). Cutoff if null-move score ≥ beta.
+  - **Futility Pruning**: At depth 1/2, skip search if static eval + margin (400/900) < alpha.
+  - **SEE Pruning**: At depth ≤ 4, skip captures/drops losing more than 100×depth material by static exchange evaluation.
+  - **History tables**: Main history `[2][81][81]` (side×from×to), continuation history `[14*81][14*81]` (prevPiece*sq × curPiece*sq, ~1.3M entries), capture history `[14][81][14]` (piece×to×captured), drop history `[2][7][81]` (side×pieceType×to). All use gravity update: `entry += bonus - entry*|bonus|/16384`, clamped to ±16384.
+  - **Aspiration windows**: ±50cp from previous iteration score, full re-search on fail.
+  - **Internal Iterative Deepening**: At depth ≥ 5 without TT move, search at depth-2 first.
+  - **Transposition table**: Bucket-based (4 entries per bucket), USI `Hash` option (1–65536 MB, default 256). Replacement: same-key priority, then quality = depth×8 + 256×(recent generation). Generation counter for aging.
+  - **Dynamic time management**: Computes optimumTime/maximumTime from `btime/wtime/binc/winc/byoyomi`. Early stop when best move stable for 3+ depths and ≥60% of optimumTime elapsed. Time extended 1.5× on eval drop >80cp or 1.3× on best-move change. Tsumero detection extends both optimum and maximum time.
+  - **Mate search**: Quick mate search (10% of time, max 300ms) before main search. Tsumero detection extends search time.
+  - **Multi-threaded**: Lazy SMP via `Threads` option. Helper threads run independent searches sharing the TT.
+- **Static Exchange Evaluation (SEE)** — Full swap algorithm in `staticExchangeEval()`. Uses `allAttackersOfOcc()` to compute both-color attackers with custom occupancy for x-ray discovery. Iterates captures by least-valuable-attacker order, recomputes attackers after each removal. King can only capture if opponent has no remaining attackers. Used for capture ordering and SEE-based pruning in search.
+- **Training pipeline** (`tools/train_nnue.py`) — PyTorch training with HalfKP sparse tensor input. Sigmoid cross-entropy loss with scale=361. Eval bootstrapping: blends engine evaluation with game outcome labels (`lambda * sigmoid(eval/scale) + (1-lambda) * result`). Multi-GPU via `nn.DataParallel` (supports RTX PRO 6000 ×2). CosineAnnealingLR scheduler. Exports to NNU4 binary format.
+
 ### Piece Encoding
 
 `makePiece(color, type) = type * color` where Black=1, White=-1. Board squares are signed ints: positive=Black, negative=White, 0=empty. PieceType 1-8 unpromoted (Pawn→King), 9-14 promoted.
@@ -86,7 +106,9 @@ Board.hash is maintained incrementally in `applyMove()` via XOR. Tables: `zobris
 
 ### Transposition Table
 
-Fixed-size array of 2^20 entries, indexed by `hash & mask`. 64 stripe mutexes selected by `(hash >> 20) % 64`. Generation counter (`ttGeneration_`) avoids clearing the table between searches — stale entries are overwritten by deeper or newer results. When `ReuseCache` is enabled (default), lookups accept entries from the current or previous generation, allowing reuse of prior search results across moves.
+Classic engine: Fixed-size array of 2^20 entries, indexed by `hash & mask`. 64 stripe mutexes selected by `(hash >> 20) % 64`. Generation counter avoids clearing between searches.
+
+NNUE engine: Bucket-based TT with 4 entries per bucket. Default 256 MB (configurable via USI `Hash` option, 1–65536 MB). Replacement policy: same-key entries always replaced; otherwise lowest-quality entry (quality = depth×8 + 256×recent_generation) is evicted. Stores key, depth, score, staticEval, flag (Exact/LowerBound/UpperBound), generation, and best move. When `ReuseCache` is enabled (default), lookups accept entries from the current or previous generation.
 
 ## Key Files
 
@@ -114,6 +136,11 @@ Fixed-size array of 2^20 entries, indexed by `hash & mask`. 64 stripe mutexes se
 | `tools/train_classic.py` | Classic engine training pipeline |
 | `tools/csa_parser.py` | CSA game record parser for training data |
 | `tools/gen_book.py` | Opening book generator via deep USI search |
+| `src/nnue.h/cpp` | NNUE network: HalfKP features, SCReLU, SIMD inference, NNU4 format |
+| `src/nnue_engine.h/cpp` | NNUE search: NegaMax, LMR, SE, SEE, history, TT buckets, time management |
+| `src/nnue_usi_protocol.h/cpp` | USI protocol loop for NNUE engine |
+| `src/search_types.h` | SearchLimits (movetime/btime/wtime/byoyomi/increment) and SearchInfo structs |
+| `tools/train_nnue.py` | NNUE training: HalfKP sparse input, sigmoid loss, eval bootstrap, multi-GPU |
 | `src/alpha_onnx_inference.h/cpp` | ResNet-SE ONNX inference (45ch spatial input, WDL+policy output) |
 | `src/alpha_mcts.h/cpp` | Improved MCTS (dynamic c_puct, FPU reduction, temperature schedule, tree reuse) |
 | `src/alpha_engine.h/cpp` | Alpha engine wrapper (ONNX + MCTS + MateSolver + OpeningBook) |
