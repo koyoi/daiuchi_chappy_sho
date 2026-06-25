@@ -10,6 +10,9 @@ namespace shogi {
 
 struct SearchLimits {
     int moveTimeMs = -1;
+    int remainingMs = -1;
+    int incrementMs = 0;
+    int byoyomiMs = 0;
 };
 
 struct SearchInfo {

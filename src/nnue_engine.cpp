@@ -173,9 +173,23 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
     stopped_.store(false);
     nodes_.store(0);
     ++ttGeneration_;
-    const int requestedMoveTime = limits.moveTimeMs > 0 ? limits.moveTimeMs : maxMoveTimeMs_;
-    const int moveTime = std::clamp(requestedMoveTime, 50, 600000);
-    deadline_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(moveTime);
+    int optimumTime = maxMoveTimeMs_;
+    int maximumTime = maxMoveTimeMs_;
+    if (limits.moveTimeMs > 0) {
+        optimumTime = limits.moveTimeMs;
+        maximumTime = limits.moveTimeMs;
+    } else if (limits.remainingMs > 0) {
+        const int movesLeft = std::max(10, 50 - board.moveNumber);
+        int base = limits.remainingMs / movesLeft + limits.incrementMs * 3 / 4;
+        optimumTime = std::clamp(base, 50, limits.remainingMs / 3);
+        maximumTime = std::clamp(base * 3, 100, limits.remainingMs * 2 / 3);
+    } else if (limits.byoyomiMs > 0) {
+        optimumTime = std::max(50, limits.byoyomiMs - 200);
+        maximumTime = std::max(50, limits.byoyomiMs - 100);
+    }
+    optimumTime = std::clamp(optimumTime, 50, 600000);
+    maximumTime = std::clamp(maximumTime, optimumTime, 600000);
+    deadline_ = searchStart + std::chrono::milliseconds(maximumTime);
 
     std::cout << "info string params: " << nnuePath_ << " (" << fileModTime(nnuePath_) << ")" << std::endl;
     if (warnOnNoWeights_ && !nnue_.loaded()) {
@@ -218,7 +232,7 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
     }
 
     {
-        const int mateBudget = std::min(moveTime / 10, 300);
+        const int mateBudget = std::min(optimumTime / 10, 300);
         MateResult mateResult = mateSolver_.searchMate(board, rootSide, 31, mateBudget);
         if (mateResult.found) {
             SearchInfo info;
@@ -242,7 +256,8 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
         MateResult tsumero = mateSolver_.detectTsumero(board, opponent, 7);
         if (tsumero.found) {
             std::cout << "info string tsumero detected -- extending search time" << std::endl;
-            deadline_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(moveTime * 3 / 2);
+            optimumTime = std::min(optimumTime * 3 / 2, maximumTime);
+            deadline_ = searchStart + std::chrono::milliseconds(std::min(maximumTime * 3 / 2, 600000));
         }
     }
 
@@ -264,6 +279,8 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
     std::vector<Move> bestMoves;
     const int maxDepth = depthLimit();
     const int pruneWidth = rootPruneWidth_;
+    Move prevBestMove{};
+    int bestMoveStableCount = 0;
 
     for (int depth = 1; depth <= maxDepth && !shouldStop(); ++depth) {
         int aspirationAlpha = -MateScore;
@@ -358,6 +375,32 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
             MoveList reordered;
             for (int i = 0; i < static_cast<int>(ranked.size()); ++i) reordered.push_back(legal[ranked[i].index]);
             legal = reordered;
+
+            if (limits.moveTimeMs <= 0) {
+                if (prevBestMove.to >= 0 && sameMove(depthBestMoves.front(), prevBestMove)) {
+                    ++bestMoveStableCount;
+                } else {
+                    bestMoveStableCount = 0;
+                }
+                prevBestMove = depthBestMoves.front();
+
+                const auto now = std::chrono::steady_clock::now();
+                const int elapsed = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - searchStart).count());
+
+                if (depth >= 2 && std::abs(depthBestScore - prevIterScore) > 80) {
+                    optimumTime = std::min(optimumTime * 3 / 2, maximumTime);
+                }
+                if (depth >= 3 && bestMoveStableCount == 0) {
+                    optimumTime = std::min(optimumTime * 13 / 10, maximumTime);
+                }
+
+                if (depth >= 5 && bestMoveStableCount >= 3 && elapsed >= optimumTime * 3 / 5) {
+                    stopped_.store(true);
+                } else if (elapsed >= optimumTime) {
+                    stopped_.store(true);
+                }
+            }
+
             prevIterScore = depthBestScore;
         }
     }

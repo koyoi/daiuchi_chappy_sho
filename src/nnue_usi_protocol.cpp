@@ -25,17 +25,12 @@ int valueAfter(const std::vector<std::string>& words, const std::string& key, in
 }
 
 SearchLimits parseSearchLimits(const std::vector<std::string>& words, Color side) {
-    const int moveTime = valueAfter(words, "movetime", -1);
-    if (moveTime > 0) return SearchLimits{std::max(50, moveTime - 30)};
-    const int byoyomi = valueAfter(words, "byoyomi", 0);
-    const int increment = valueAfter(words, side == Black ? "binc" : "winc", 0);
-    const int remaining = valueAfter(words, side == Black ? "btime" : "wtime", 0);
-    int budget = -1;
-    if (byoyomi > 0) budget = std::max(50, byoyomi - 100);
-    else if (increment > 0) budget = std::max(50, increment + remaining / 40 - 100);
-    else if (remaining > 0) budget = std::max(50, remaining / 40);
-    if (budget < 0) return SearchLimits{-1};
-    return SearchLimits{std::clamp(budget, 50, 10000)};
+    SearchLimits limits;
+    limits.moveTimeMs = valueAfter(words, "movetime", -1);
+    limits.byoyomiMs = valueAfter(words, "byoyomi", 0);
+    limits.incrementMs = valueAfter(words, side == Black ? "binc" : "winc", 0);
+    limits.remainingMs = valueAfter(words, side == Black ? "btime" : "wtime", 0);
+    return limits;
 }
 
 void printSearchInfo(const SearchInfo& info) {
