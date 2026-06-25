@@ -7,8 +7,9 @@
 #include "position.h"
 #include "text_util.h"
 
-#include <iostream>
 #include <algorithm>
+#include <chrono>
+#include <iostream>
 #include <iterator>
 #include <string>
 #include <vector>
@@ -325,9 +326,18 @@ void usiLoop() {
                     engineSide = board.side;
                     engineSideKnown = true;
                 }
-                const Move move = engine.chooseMove(board, parseSearchLimits(words, board.side), [](const SearchInfo& info) {
-                    printSearchInfo(info);
-                });
+                int lastInfoDepth = -1;
+                auto lastInfoTime = std::chrono::steady_clock::now();
+                const Move move = engine.chooseMove(board, parseSearchLimits(words, board.side),
+                    [&lastInfoDepth, &lastInfoTime](const SearchInfo& info) {
+                        auto now = std::chrono::steady_clock::now();
+                        if (info.depth != lastInfoDepth ||
+                            std::chrono::duration_cast<std::chrono::milliseconds>(now - lastInfoTime).count() >= 333) {
+                            printSearchInfo(info);
+                            lastInfoDepth = info.depth;
+                            lastInfoTime = now;
+                        }
+                    });
                 if (move.to < 0) {
                     std::cout << "bestmove resign" << std::endl;
                 } else {

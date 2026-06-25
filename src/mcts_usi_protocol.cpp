@@ -7,8 +7,9 @@
 #include "position.h"
 #include "text_util.h"
 
-#include <iostream>
 #include <algorithm>
+#include <chrono>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -157,11 +158,13 @@ void mctsUsiLoop() {
                     std::cout << "info string ERROR: " << engine.nnModelPath() << " not found" << std::endl;
                 else
                     std::cout << "info string ERROR: " << engine.nnModelPath() << " load failed" << std::endl;
-                if (!engine.nnLastError().empty()) {
+                if (!engine.nnLastError().empty())
                     std::cout << "info string  -> " << engine.nnLastError() << std::endl;
-                }
             } else {
-                std::cout << "info string NN model loaded: " << engine.nnModelPath() << std::endl;
+                std::cout << "info string NN model loaded: " << engine.nnModelPath()
+                          << " [" << engine.nnDeviceUsed() << "]" << std::endl;
+                if (!engine.nnCudaError().empty())
+                    std::cout << "info string WARNING: CUDA unavailable, using CPU -> " << engine.nnCudaError() << std::endl;
             }
             if (engine.loadBook())
                 std::cout << "info string Opening book loaded" << std::endl;
@@ -204,8 +207,15 @@ void mctsUsiLoop() {
                 engineSide = board.side;
                 engineSideKnown = true;
             }
+            auto lastInfoTime = std::chrono::steady_clock::now();
             const Move move = engine.chooseMove(board, parseSearchLimits(words, board.side),
-                [](const SearchInfo& info) { printSearchInfo(info); });
+                [&lastInfoTime](const SearchInfo& info) {
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastInfoTime).count() >= 333) {
+                        printSearchInfo(info);
+                        lastInfoTime = now;
+                    }
+                });
             if (move.to < 0) {
                 std::cout << "bestmove resign" << std::endl;
             } else {

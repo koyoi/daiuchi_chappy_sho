@@ -38,6 +38,8 @@ public:
     bool nnReady() const { return nn_.isLoaded(); }
     const std::string& nnLastError() const { return nn_.lastError(); }
     const std::string& nnModelPath() const { return nn_.modelPath(); }
+    const std::string& nnDeviceUsed() const { return nn_.deviceUsed(); }
+    const std::string& nnCudaError() const { return nn_.cudaError(); }
     SearchInfo lastSearchInfo() const;
 
     // For self-play training data
@@ -50,7 +52,7 @@ private:
     OpeningBook book_;
     bool bookEnabled_ = true;
     int maxMoveTimeMs_ = 3000;
-    int simulations_ = 1600;
+    int simulations_ = 10000;
     std::string nnModel_ = "alpha_model.onnx";
     std::string nnDevice_ = "auto";
     std::mt19937 rng_{std::random_device{}()};

@@ -27,6 +27,8 @@ public:
     bool isLoaded() const;
     const std::string& lastError() const { return lastError_; }
     const std::string& modelPath() const { return modelPath_; }
+    const std::string& deviceUsed() const { return deviceUsed_; }
+    const std::string& cudaError() const { return cudaError_; }
 
     AlphaNNOutput evaluate(const Board& board);
     std::vector<AlphaNNOutput> evaluateBatch(const std::vector<Board>& boards);
@@ -41,6 +43,8 @@ private:
     std::unique_ptr<Impl> impl_;
     std::string lastError_;
     std::string modelPath_;
+    std::string deviceUsed_;
+    std::string cudaError_;
 };
 
 } // namespace shogi

@@ -26,19 +26,31 @@ bool OnnxInference::loadModel(const std::string& modelPath, const std::string& d
         opts.SetIntraOpNumThreads(1);
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-        if (device != "cpu") {
+        bool cudaRequested = (device != "cpu");
+        bool cudaOk = false;
+        if (cudaRequested) {
             try {
                 OrtCUDAProviderOptions cudaOpts{};
                 cudaOpts.device_id = 0;
                 opts.AppendExecutionProvider_CUDA(cudaOpts);
+                cudaOk = true;
+            } catch (const Ort::Exception& e) {
+                cudaError_ = e.what();
+            } catch (const std::exception& e) {
+                cudaError_ = e.what();
             } catch (...) {
-                // CUDA not available, fall back to CPU
+                cudaError_ = "unknown error";
             }
         }
 
+#ifdef _WIN32
         std::wstring wpath(modelPath.begin(), modelPath.end());
         impl_->session = std::make_unique<Ort::Session>(impl_->env, wpath.c_str(), opts);
+#else
+        impl_->session = std::make_unique<Ort::Session>(impl_->env, modelPath.c_str(), opts);
+#endif
         impl_->loaded = true;
+        deviceUsed_ = (cudaRequested && cudaOk) ? "CUDA" : "CPU";
         lastError_.clear();
         return true;
     } catch (const Ort::Exception& e) {

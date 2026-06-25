@@ -60,10 +60,12 @@ public:
     static std::string encodeBoardState(const Board& board);
 
     bool ensureProcess();
-    bool isReady() const { return processRunning_; }
+    bool isReady() const;
     void shutdown();
     const std::string& lastError() const { return lastError_; }
     const std::string& modelPath() const { return settings_.model; }
+    std::string deviceUsed() const;
+    std::string cudaError() const;
 
 private:
     bool sendLine(const std::string& line);

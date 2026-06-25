@@ -17,6 +17,8 @@ public:
     bool loadModel(const std::string& modelPath, const std::string& device = "auto");
     bool isLoaded() const;
     const std::string& lastError() const { return lastError_; }
+    const std::string& deviceUsed() const { return deviceUsed_; }
+    const std::string& cudaError() const { return cudaError_; }
 
     NNOutput evaluate(const Board& board);
     std::vector<NNOutput> evaluateBatch(const std::vector<Board>& boards);
@@ -32,6 +34,8 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     std::string lastError_;
+    std::string deviceUsed_;
+    std::string cudaError_;
 };
 
 } // namespace shogi

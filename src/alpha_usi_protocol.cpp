@@ -8,6 +8,7 @@
 #include "text_util.h"
 
 #include <algorithm>
+#include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -132,7 +133,7 @@ void alphaUsiLoop() {
             std::cout << "id name KishiTo-Alpha" << std::endl;
             std::cout << "id author kishi_to" << std::endl;
             std::cout << "option name MaxMoveTimeMs type spin default 3000 min 50 max 600000" << std::endl;
-            std::cout << "option name MctsSimulations type spin default 1600 min 1 max 100000" << std::endl;
+            std::cout << "option name MctsSimulations type spin default 10000 min 1 max 1000000" << std::endl;
             std::cout << "option name NNModel type string default alpha_model.onnx" << std::endl;
             std::cout << "option name NNDevice type string default auto" << std::endl;
             std::cout << "option name MctsBatchSize type spin default 16 min 1 max 64" << std::endl;
@@ -150,7 +151,10 @@ void alphaUsiLoop() {
                 if (!engine.nnLastError().empty())
                     std::cout << "info string  -> " << engine.nnLastError() << std::endl;
             } else {
-                std::cout << "info string NN model loaded: " << engine.nnModelPath() << std::endl;
+                std::cout << "info string NN model loaded: " << engine.nnModelPath()
+                          << " [" << engine.nnDeviceUsed() << "]" << std::endl;
+                if (!engine.nnCudaError().empty())
+                    std::cout << "info string WARNING: CUDA unavailable, using CPU -> " << engine.nnCudaError() << std::endl;
             }
             if (engine.loadBook())
                 std::cout << "info string Opening book loaded" << std::endl;
@@ -186,9 +190,16 @@ void alphaUsiLoop() {
                 }
             } else {
                 lastSearchSide = board.side;
+                auto lastInfoTime = std::chrono::steady_clock::now();
                 const Move move = engine.chooseMove(
                     board, parseSearchLimits(words, board.side),
-                    [](const SearchInfo& info) { printSearchInfo(info); });
+                    [&lastInfoTime](const SearchInfo& info) {
+                        auto now = std::chrono::steady_clock::now();
+                        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastInfoTime).count() >= 333) {
+                            printSearchInfo(info);
+                            lastInfoTime = now;
+                        }
+                    });
                 if (move.to < 0) {
                     std::cout << "bestmove resign" << std::endl;
                 } else {

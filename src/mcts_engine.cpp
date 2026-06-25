@@ -31,7 +31,6 @@ Move MCTSEngineWrapper::chooseMove(const Board& board, const SearchLimits& limit
     const int moveTime = limits.moveTimeMs > 0 ? limits.moveTimeMs : maxMoveTimeMs_;
     const int clampedTime = std::clamp(moveTime, 50, 600000);
 
-    std::cout << "info string params: " << nn_.modelPath() << " (" << fileModTime(nn_.modelPath()) << ")" << std::endl;
     if (warnOnNoModel_ && !nn_.isReady()) {
         if (!fileExists(nn_.modelPath()))
             std::cout << "info string WARNING: " << nn_.modelPath() << " not found -- search quality degraded" << std::endl;
@@ -149,6 +148,8 @@ bool MCTSEngineWrapper::loadBook(const std::string& path) { return book_.load(pa
 bool MCTSEngineWrapper::ensureNN() { return nn_.ensureProcess(); }
 const std::string& MCTSEngineWrapper::nnLastError() const { return nn_.lastError(); }
 const std::string& MCTSEngineWrapper::nnModelPath() const { return nn_.modelPath(); }
+std::string MCTSEngineWrapper::nnDeviceUsed() const { return nn_.deviceUsed(); }
+std::string MCTSEngineWrapper::nnCudaError() const { return nn_.cudaError(); }
 
 MateResult MCTSEngineWrapper::searchMate(const Board& board, int timeLimitMs) {
     return mateSolver_.searchMate(board, board.side, 31, timeLimitMs);

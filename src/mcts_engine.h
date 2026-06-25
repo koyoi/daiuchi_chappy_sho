@@ -40,6 +40,8 @@ public:
     bool nnReady() const { return nn_.isReady(); }
     const std::string& nnLastError() const;
     const std::string& nnModelPath() const;
+    std::string nnDeviceUsed() const;
+    std::string nnCudaError() const;
     SearchInfo lastSearchInfo() const;
 
 private:

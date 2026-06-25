@@ -172,6 +172,27 @@ void NNBridge::setModel(const std::string& m) {
 }
 void NNBridge::setDevice(const std::string& d) { if (!d.empty()) settings_.device = d; }
 
+bool NNBridge::isReady() const {
+#ifdef HAS_ONNXRUNTIME
+    if (onnx_ && onnx_->isLoaded()) return true;
+#endif
+    return processRunning_;
+}
+
+std::string NNBridge::deviceUsed() const {
+#ifdef HAS_ONNXRUNTIME
+    if (onnx_ && onnx_->isLoaded()) return onnx_->deviceUsed();
+#endif
+    return "Python";
+}
+
+std::string NNBridge::cudaError() const {
+#ifdef HAS_ONNXRUNTIME
+    if (onnx_) return onnx_->cudaError();
+#endif
+    return {};
+}
+
 NNOutput NNBridge::makeFallbackOutput() const {
     NNOutput out;
     out.value = 0.0;
