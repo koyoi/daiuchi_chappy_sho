@@ -316,16 +316,34 @@ void NNUENetwork::updateAccumulatorIncremental(const Board& boardAfterMove, cons
 int NNUENetwork::evaluateFromAccumulator(const nnue::Accumulator& acc, Color perspective) const {
     constexpr float invScale = 1.0f / nnue::WeightScale;
 
-    // SCReLU: clamp(x, 0, 1)^2 on L0 output
-    auto screlu = [](float x) { float c = std::clamp(x, 0.0f, 1.0f); return c * c; };
-
-    float concat[2 * nnue::L0Size];
+    alignas(32) float concat[2 * nnue::L0Size];
     const std::int32_t* own = (perspective == Black) ? acc.black : acc.white;
     const std::int32_t* opp = (perspective == Black) ? acc.white : acc.black;
+
+#if NNUE_USE_AVX2
+    const __m256 vInvScale = _mm256_set1_ps(invScale);
+    const __m256 vZero = _mm256_setzero_ps();
+    const __m256 vOne = _mm256_set1_ps(1.0f);
+    // SCReLU with AVX2: convert int32→float, scale, clamp(0,1), square
+    for (int i = 0; i < nnue::L0Size; i += 8) {
+        __m256i vi = _mm256_load_si256(reinterpret_cast<const __m256i*>(own + i));
+        __m256 vf = _mm256_mul_ps(_mm256_cvtepi32_ps(vi), vInvScale);
+        vf = _mm256_min_ps(_mm256_max_ps(vf, vZero), vOne);
+        _mm256_store_ps(concat + i, _mm256_mul_ps(vf, vf));
+    }
+    for (int i = 0; i < nnue::L0Size; i += 8) {
+        __m256i vi = _mm256_load_si256(reinterpret_cast<const __m256i*>(opp + i));
+        __m256 vf = _mm256_mul_ps(_mm256_cvtepi32_ps(vi), vInvScale);
+        vf = _mm256_min_ps(_mm256_max_ps(vf, vZero), vOne);
+        _mm256_store_ps(concat + nnue::L0Size + i, _mm256_mul_ps(vf, vf));
+    }
+#else
+    auto screlu = [](float x) { float c = std::clamp(x, 0.0f, 1.0f); return c * c; };
     for (int i = 0; i < nnue::L0Size; ++i)
         concat[i] = screlu(static_cast<float>(own[i]) * invScale);
     for (int i = 0; i < nnue::L0Size; ++i)
         concat[nnue::L0Size + i] = screlu(static_cast<float>(opp[i]) * invScale);
+#endif
 
     float h1[nnue::L1Size];
     for (int j = 0; j < nnue::L1Size; ++j) {

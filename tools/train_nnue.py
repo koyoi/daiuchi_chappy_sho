@@ -322,8 +322,8 @@ def parse_game_nnue(filepath: Path, min_rate: int = 0,
                 bf, wf = extract_features_from_board(board)
                 result = 1.0 if black_win else -1.0
                 samples.append({
-                    "black_feats": bf,
-                    "white_feats": wf,
+                    "black_feats": np.array(bf, dtype=np.int32),
+                    "white_feats": np.array(wf, dtype=np.int32),
                     "side_black": side_black,
                     "result": result,
                 })
@@ -351,39 +351,34 @@ class NNUEDataset(Dataset):
 
     def __getitem__(self, idx):
         s = self.samples[idx]
-        black_indices = [fi for fi in s["black_feats"] if 0 <= fi < INPUT_DIM]
-        white_indices = [fi for fi in s["white_feats"] if 0 <= fi < INPUT_DIM]
         side = 1.0 if s["side_black"] else -1.0
-        result = s["result"] * side  # +1 = side-to-move wins, -1 = loses
-        return black_indices, white_indices, np.float32(side), np.float32(result)
+        result = s["result"] * side
+        return s["black_feats"], s["white_feats"], np.float32(side), np.float32(result)
+
+
+def _build_sparse(indices_list, batch_size):
+    """Build a sparse COO tensor from per-sample index lists using numpy vectorization."""
+    lengths = np.array([len(x) for x in indices_list], dtype=np.int64)
+    total = int(lengths.sum())
+    if total == 0:
+        return torch.sparse_coo_tensor(
+            torch.zeros(2, 0, dtype=torch.long), torch.zeros(0), (batch_size, INPUT_DIM)
+        )
+    rows = np.repeat(np.arange(batch_size, dtype=np.int64), lengths)
+    cols = np.concatenate([np.asarray(x, dtype=np.int64) for x in indices_list])
+    idx = torch.from_numpy(np.stack([rows, cols]))
+    val = torch.ones(total, dtype=torch.float32)
+    return torch.sparse_coo_tensor(idx, val, (batch_size, INPUT_DIM)).coalesce()
 
 
 def collate_sparse(batch):
     black_indices_list, white_indices_list, sides, targets = zip(*batch)
     batch_size = len(batch)
-
-    black_rows, black_cols = [], []
-    white_rows, white_cols = [], []
-    for i in range(batch_size):
-        for fi in black_indices_list[i]:
-            black_rows.append(i)
-            black_cols.append(fi)
-        for fi in white_indices_list[i]:
-            white_rows.append(i)
-            white_cols.append(fi)
-
-    def _make_sparse(rows, cols):
-        if rows:
-            idx = torch.LongTensor([rows, cols])
-            val = torch.ones(len(rows))
-            return torch.sparse_coo_tensor(idx, val, (batch_size, INPUT_DIM)).coalesce()
-        return torch.sparse_coo_tensor(
-            torch.zeros(2, 0, dtype=torch.long), torch.zeros(0), (batch_size, INPUT_DIM)
-        )
-
     sides_t = torch.tensor(np.array(sides), dtype=torch.float32)
     targets_t = torch.tensor(np.array(targets), dtype=torch.float32)
-    return _make_sparse(black_rows, black_cols), _make_sparse(white_rows, white_cols), sides_t, targets_t
+    return (_build_sparse(black_indices_list, batch_size),
+            _build_sparse(white_indices_list, batch_size),
+            sides_t, targets_t)
 
 
 class NNUEModel(nn.Module):
@@ -459,15 +454,13 @@ class NNUEDatasetWithSoftLabels(Dataset):
 
     def __getitem__(self, idx):
         s = self.samples[idx]
-        black_indices = [fi for fi in s["black_feats"] if 0 <= fi < INPUT_DIM]
-        white_indices = [fi for fi in s["white_feats"] if 0 <= fi < INPUT_DIM]
         side = 1.0 if s["side_black"] else -1.0
         if "soft_label" in s:
             label = s["soft_label"]
         else:
             result = s["result"] * side
-            label = (result + 1.0) / 2.0  # -1..+1 -> 0..1
-        return black_indices, white_indices, np.float32(side), np.float32(label)
+            label = (result + 1.0) / 2.0
+        return s["black_feats"], s["white_feats"], np.float32(side), np.float32(label)
 
 
 def export_nnue_bin(model_or_module: nn.Module, path: str):
