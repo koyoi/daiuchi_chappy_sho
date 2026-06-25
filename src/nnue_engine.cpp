@@ -48,6 +48,12 @@ int pieceValue(PieceType type) {
     }
 }
 
+void gravityUpdate(std::int16_t& entry, int depth, bool good) {
+    const int bonus = good ? depth * depth : -(depth * depth);
+    int val = static_cast<int>(entry) + bonus - static_cast<int>(entry) * std::abs(bonus) / 16384;
+    entry = static_cast<std::int16_t>(std::clamp(val, -16384, 16384));
+}
+
 int detectPhysicalCores() {
 #ifdef _WIN32
     DWORD length = 0;
@@ -90,9 +96,13 @@ thread_local std::array<nnue::Accumulator, AccStackSize> accStack;
 
 NNUEEngine::NNUEEngine()
     : transposition_(TTSize),
+      contHistory_(static_cast<std::size_t>(ContHistDim) * ContHistDim, 0),
       rng_(static_cast<unsigned int>(std::chrono::steady_clock::now().time_since_epoch().count())) {
     zobrist::init();
     threads_ = defaultThreadCount();
+    for (int d = 0; d < MaxLMRDepth; ++d)
+        for (int m = 0; m < MaxLMRMoves; ++m)
+            lmrTable_[d][m] = (d > 0 && m > 0) ? static_cast<int>(0.75 + std::log(d) * std::log(m) / 2.25) : 0;
 }
 
 int NNUEEngine::eval(const Board& board, int ply) const {
@@ -383,7 +393,7 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
 }
 
 // NegaMax search: always returns score from the perspective of board.side
-int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bool allowNullMove, const Move& prevMove) const {
+int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bool allowNullMove, const Move& prevMove, const Move& excludedMove) const {
     nodes_.fetch_add(1);
     if (shouldStop()) return eval(board, ply);
 
@@ -392,12 +402,17 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bo
     const int ttIndex = static_cast<int>(key & TTMask);
     const int lockIndex = static_cast<int>((key >> TTBits) % LockCount);
     Move ttMove{};
+    int ttScore = 0, ttDepth = -1;
+    std::uint8_t ttFlag = 0;
     {
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         const TranspositionEntry& slot = transposition_[ttIndex];
         if (slot.key == key && isRecentGeneration(slot.generation)) {
             ttMove = slot.bestMove;
-            if (slot.depth >= depth) {
+            ttScore = slot.score;
+            ttDepth = slot.depth;
+            ttFlag = slot.flag;
+            if (slot.depth >= depth && excludedMove.to < 0) {
                 if (slot.flag == ExactScore) return slot.score;
                 if (slot.flag == LowerBound) alpha = std::max(alpha, slot.score);
                 else if (slot.flag == UpperBound) beta = std::min(beta, slot.score);
@@ -450,6 +465,16 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bo
         if (slot.key == key && isRecentGeneration(slot.generation)) ttMove = slot.bestMove;
     }
 
+    // Singular extension
+    int singularExtension = 0;
+    if (depth >= seMinDepth_ && ttMove.to >= 0 && excludedMove.to < 0
+        && ttDepth >= depth - 3 && ttFlag != UpperBound
+        && std::abs(ttScore) < MateScore / 2) {
+        const int seBeta = ttScore - 2 * depth;
+        int seVal = search(board, depth / 2, ply, seBeta - 1, seBeta, false, prevMove, ttMove);
+        if (seVal < seBeta) singularExtension = 1;
+    }
+
     orderMoves(board, legal, ply, prevMove);
 
     const bool canFutilityPrune = !inCheck && (depth == 1 || depth == 2);
@@ -464,6 +489,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bo
     bool anySearched = false;
 
     for (const Move& move : legal) {
+        if (excludedMove.to >= 0 && sameMove(move, excludedMove)) { ++moveIndex; continue; }
         const bool isQuiet = (move.isDrop() || board.squares[move.to] == 0) && !move.promote;
         const bool isCheck = givesCheck(board, move);
         if (canFutilityPrune && isQuiet && !isCheck && staticEval + futilityMargin <= alpha) { ++moveIndex; continue; }
@@ -475,6 +501,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bo
         if (ply + 1 < AccStackSize) nnue_.updateAccumulatorIncremental(board, accStack[ply], delta, accStack[ply + 1]);
         const bool givesCheckNow = isKingAttacked(board, board.side);
         int extension = (givesCheckNow && ply < MaxPly - 10) ? 1 : 0;
+        if (singularExtension > 0 && sameMove(move, ttMove)) extension = std::max(extension, singularExtension);
         const int newDepth = depth - 1 + extension;
 
         int val = 0;
@@ -482,8 +509,20 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bo
             val = -search(board, newDepth, ply + 1, -beta, -alpha, true, move);
         } else {
             bool needsFullWindow = false;
-            if (depth >= lmrMinDepth_ && moveIndex >= lmrFullDepthMoves_ && isQuiet && !isCheck && !inCheck && !givesCheckNow) {
-                int R = 1 + (depth >= 6 ? 1 : 0) + (moveIndex >= 10 ? 1 : 0);
+            int R = lmrTable_[std::min(depth, MaxLMRDepth - 1)][std::min(moveIndex, MaxLMRMoves - 1)];
+            if (R > 0 && isQuiet && !isCheck && !inCheck && !givesCheckNow) {
+                const int cIdx = board.side == Black ? 0 : 1;
+                int histVal = 0;
+                if (move.isDrop()) {
+                    int dti = static_cast<int>(move.drop) - 1;
+                    if (dti >= 0 && dti < 7) histVal = dropHistory_[cIdx][dti][move.to];
+                } else if (move.from >= 0 && move.from < BoardSize) {
+                    histVal = history_[cIdx][move.from][move.to];
+                }
+                if (histVal > 2000) R = std::max(0, R - 1);
+                else if (histVal < -2000) R += 1;
+            }
+            if (R > 0 && isQuiet && !isCheck && !inCheck && !givesCheckNow) {
                 val = -search(board, std::max(1, newDepth - R), ply + 1, -alpha - 1, -alpha, true, move);
                 if (val > alpha) {
                     val = -search(board, newDepth, ply + 1, -alpha - 1, -alpha, true, move);
@@ -501,11 +540,52 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bo
         if (val > best) { best = val; bestMoveLocal = move; }
         alpha = std::max(alpha, best);
         if (alpha >= beta) {
+            const int cIdx = board.side == Black ? 0 : 1;
+            auto getPt = [&](const Move& m) -> PieceType {
+                if (m.isDrop()) return m.drop;
+                if (m.from >= 0 && m.from < BoardSize) return typeOf(board.squares[m.from]);
+                return static_cast<PieceType>(0);
+            };
             if (isQuiet) {
                 storeKiller(ply, move);
                 updateHistory(board.side, move, depth, true);
                 storeCounterMove(board.side, prevMove, move);
-                for (int q = 0; q < quietsCount; ++q) updateHistory(board.side, quietsTried[q], depth, false);
+                if (move.isDrop()) {
+                    int dti = static_cast<int>(move.drop) - 1;
+                    if (dti >= 0 && dti < 7) gravityUpdate(dropHistory_[cIdx][dti][move.to], depth, true);
+                }
+                if (prevMove.to >= 0 && prevMove.to < BoardSize) {
+                    PieceType prevPt = prevMove.isDrop() ? prevMove.drop : typeOf(board.squares[prevMove.to]);
+                    PieceType curPt = getPt(move);
+                    int pi = static_cast<int>(prevPt) - 1, ci = static_cast<int>(curPt) - 1;
+                    if (pi >= 0 && pi < ContHistPieces && ci >= 0 && ci < ContHistPieces) {
+                        int idx = (pi * BoardSize + prevMove.to) * ContHistDim + ci * BoardSize + move.to;
+                        gravityUpdate(contHistory_[idx], depth, true);
+                    }
+                }
+                for (int q = 0; q < quietsCount; ++q) {
+                    updateHistory(board.side, quietsTried[q], depth, false);
+                    if (quietsTried[q].isDrop()) {
+                        int dti = static_cast<int>(quietsTried[q].drop) - 1;
+                        if (dti >= 0 && dti < 7) gravityUpdate(dropHistory_[cIdx][dti][quietsTried[q].to], depth, false);
+                    }
+                    if (prevMove.to >= 0 && prevMove.to < BoardSize) {
+                        PieceType prevPt = prevMove.isDrop() ? prevMove.drop : typeOf(board.squares[prevMove.to]);
+                        PieceType curPt = getPt(quietsTried[q]);
+                        int pi = static_cast<int>(prevPt) - 1, ci = static_cast<int>(curPt) - 1;
+                        if (pi >= 0 && pi < ContHistPieces && ci >= 0 && ci < ContHistPieces) {
+                            int idx = (pi * BoardSize + prevMove.to) * ContHistDim + ci * BoardSize + quietsTried[q].to;
+                            gravityUpdate(contHistory_[idx], depth, false);
+                        }
+                    }
+                }
+            } else {
+                if (!move.isDrop() && move.from >= 0 && move.from < BoardSize && board.squares[move.to] != 0) {
+                    int mpi = static_cast<int>(typeOf(board.squares[move.from])) - 1;
+                    int cpi = static_cast<int>(typeOf(board.squares[move.to])) - 1;
+                    if (mpi >= 0 && mpi < ContHistPieces && cpi >= 0 && cpi < ContHistPieces)
+                        gravityUpdate(captHistory_[mpi][move.to][cpi], depth, true);
+                }
             }
             break;
         }
@@ -515,7 +595,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bo
 
     if (!anySearched) return canFutilityPrune ? staticEval : -MateScore - depth;
 
-    {
+    if (excludedMove.to < 0) {
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         TranspositionEntry& slot = transposition_[ttIndex];
         if (slot.generation != ttGeneration_ || depth >= slot.depth) {
@@ -597,6 +677,9 @@ int NNUEEngine::moveOrderScore(const Board& board, const Move& move, int ply, co
         const PieceType captured = typeOf(board.squares[move.to]);
         const PieceType moving = typeOf(board.squares[move.from]);
         score += 10000 + pieceValue(captured) * 10 - pieceValue(moving);
+        int mpi = static_cast<int>(moving) - 1, cpi = static_cast<int>(captured) - 1;
+        if (mpi >= 0 && mpi < ContHistPieces && cpi >= 0 && cpi < ContHistPieces)
+            score += captHistory_[mpi][move.to][cpi] / 8;
     }
     if (givesCheck(board, move)) score += 8000;
     if (move.promote) score += 6000;
@@ -615,6 +698,9 @@ int NNUEEngine::moveOrderScore(const Board& board, const Move& move, int ply, co
     }
     if (move.isDrop()) {
         score += pieceValue(move.drop) / 3;
+        const int colorIdx2 = board.side == Black ? 0 : 1;
+        int dti = static_cast<int>(move.drop) - 1;
+        if (dti >= 0 && dti < 7) score += dropHistory_[colorIdx2][dti][move.to];
         const int enemyKing = board.side == Black ? board.whiteKingSquare : board.blackKingSquare;
         if (enemyKing >= 0 && chebyshevDistance(move.to, enemyKing) <= 2) score += 200;
     } else if (board.squares[move.to] == 0) {
@@ -624,6 +710,16 @@ int NNUEEngine::moveOrderScore(const Board& board, const Move& move, int ply, co
         if (isSquareAttacked(board, move.to, enemy)) {
             const int enemyKing = board.side == Black ? board.whiteKingSquare : board.blackKingSquare;
             if (enemyKing >= 0 && chebyshevDistance(move.to, enemyKing) <= 2) score += 300;
+        }
+    }
+    if (prevMove.to >= 0 && prevMove.to < BoardSize && score < 6000) {
+        PieceType prevPt = prevMove.isDrop() ? prevMove.drop : typeOf(board.squares[prevMove.to]);
+        PieceType curPt = move.isDrop() ? move.drop
+            : (move.from >= 0 && move.from < BoardSize ? typeOf(board.squares[move.from]) : static_cast<PieceType>(0));
+        int pi = static_cast<int>(prevPt) - 1, ci = static_cast<int>(curPt) - 1;
+        if (pi >= 0 && pi < ContHistPieces && ci >= 0 && ci < ContHistPieces) {
+            int idx = (pi * BoardSize + prevMove.to) * ContHistDim + ci * BoardSize + move.to;
+            score += contHistory_[idx] / 2;
         }
     }
     return score;
@@ -658,6 +754,9 @@ void NNUEEngine::clearSearchTables() const {
     for (auto& ply : killers_) for (auto& slot : ply) slot = Move{};
     for (auto& color : history_) for (auto& from : color) for (auto& val : from) val /= 2;
     for (auto& color : counterMoves_) for (auto& from : color) for (auto& m : from) m = Move{};
+    for (auto& v : contHistory_) v /= 2;
+    for (auto& a : captHistory_) for (auto& b : a) for (auto& v : b) v /= 2;
+    for (auto& a : dropHistory_) for (auto& b : a) for (auto& v : b) v /= 2;
 }
 
 bool NNUEEngine::shouldStop() const {
@@ -717,8 +816,7 @@ bool NNUEEngine::loadBook(const std::string& path) { return book_.load(path); }
 bool NNUEEngine::loadNNUE(const std::string& path) { nnuePath_ = path; return nnue_.load(path); }
 
 void NNUEEngine::setParam(const std::string& name, int value) {
-    if (name == "LMRFullDepthMoves") lmrFullDepthMoves_ = value;
-    else if (name == "LMRMinDepth") lmrMinDepth_ = value;
+    if (name == "SEMinDepth") seMinDepth_ = value;
     else if (name == "NMPMinDepth") nmpMinDepth_ = value;
     else if (name == "NMPReduction") nmpReduction_ = value;
     else if (name == "FutilityMargin1") futilityMargin1_ = value;
@@ -732,8 +830,7 @@ void NNUEEngine::setParam(const std::string& name, int value) {
 }
 
 int NNUEEngine::getParam(const std::string& name) const {
-    if (name == "LMRFullDepthMoves") return lmrFullDepthMoves_;
-    if (name == "LMRMinDepth") return lmrMinDepth_;
+    if (name == "SEMinDepth") return seMinDepth_;
     if (name == "NMPMinDepth") return nmpMinDepth_;
     if (name == "NMPReduction") return nmpReduction_;
     if (name == "FutilityMargin1") return futilityMargin1_;

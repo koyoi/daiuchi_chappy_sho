@@ -43,7 +43,7 @@ public:
     void setRootPruneWidth(int w) { rootPruneWidth_ = w; }
 
 private:
-    int search(Board& board, int depth, int ply, int alpha, int beta, bool allowNullMove = true, const Move& prevMove = Move{}) const;
+    int search(Board& board, int depth, int ply, int alpha, int beta, bool allowNullMove = true, const Move& prevMove = Move{}, const Move& excludedMove = Move{}) const;
     int quiescence(Board& board, int depth, int ply, int alpha, int beta) const;
     std::vector<Move> extractPV(Board board, int maxDepth) const;
     void orderMoves(const Board& board, MoveList& moves, int ply, const Move& prevMove = Move{}) const;
@@ -75,8 +75,10 @@ private:
     static constexpr int LockCount = 64;
     static constexpr int MaxPly = 128;
     static constexpr int KillerSlots = 2;
-    int lmrFullDepthMoves_ = 4;
-    int lmrMinDepth_ = 3;
+    static constexpr int MaxLMRDepth = 64;
+    static constexpr int MaxLMRMoves = 64;
+    int lmrTable_[MaxLMRDepth][MaxLMRMoves]{};
+    int seMinDepth_ = 8;
     int nmpMinDepth_ = 3;
     int nmpReduction_ = 3;
     int futilityMargin1_ = 400;
@@ -108,6 +110,11 @@ private:
     mutable std::array<std::array<Move, KillerSlots>, MaxPly> killers_{};
     mutable std::array<std::array<std::array<std::int16_t, BoardSize>, BoardSize>, 2> history_{};
     mutable std::array<std::array<std::array<Move, BoardSize>, BoardSize>, 2> counterMoves_{};
+    static constexpr int ContHistPieces = 14;
+    static constexpr int ContHistDim = ContHistPieces * BoardSize;
+    mutable std::vector<std::int16_t> contHistory_;
+    mutable std::int16_t captHistory_[ContHistPieces][BoardSize][ContHistPieces]{};
+    mutable std::int16_t dropHistory_[2][7][BoardSize]{};
     int maxMoveTimeMs_ = 1000;
     int threads_ = 1;
     std::mt19937 rng_;
