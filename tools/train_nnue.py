@@ -3,16 +3,18 @@
 
 Produces a binary nnue.bin file that kishi-to-nnue loads at startup.
 
-The training signal is win/loss outcome: each position is labeled +1 or -1
-depending on whether the side to move eventually won. The network learns
-to predict the game outcome as a score.
-
 Uses HalfKP features: kingSquare(81) x coloredPieceType(26) x pieceSquare(81)
 plus hand piece features (76 dims). Total input = 170662 sparse binary features.
 
+Supports:
+- Sigmoid + cross-entropy loss (default) or MSE + tanh (legacy)
+- Eval bootstrapping: blend engine eval with game outcome
+- Multi-GPU training via DataParallel (e.g. RTX PRO 6000 x2)
+
 Usage:
   python tools/train_nnue.py --kifu kifu/floodgate
-  python tools/train_nnue.py --kifu kifu/floodgate --epochs 10 --lr 1e-3 --batch-size 4096
+  python tools/train_nnue.py --kifu kifu/floodgate --epochs 20 --batch-size 65536
+  python tools/train_nnue.py --kifu kifu/floodgate --bootstrap nnue_model.pt --lambda-blend 0.5
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ import numpy as np
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
     import torch.optim as optim
     from torch.utils.data import Dataset, DataLoader
 except ImportError:
@@ -68,6 +71,7 @@ L0_SIZE = 256
 L1_SIZE = 64
 L2_SIZE = 32
 WEIGHT_SCALE = 64
+EVAL_SCALE = 361.0  # sigmoid scaling factor (Stockfish convention)
 
 # C++ piece type mapping
 PT_PAWN = 1; PT_LANCE = 2; PT_KNIGHT = 3; PT_SILVER = 4
@@ -77,20 +81,17 @@ PT_HORSE = 13; PT_DRAGON = 14
 
 
 def _piece_type_index(is_own: bool, piece_type: int) -> int:
-    """Map piece type to HalfKP index (0..25). Returns -1 for King."""
     if piece_type == PT_KING:
         return -1
-    type_idx = piece_type - 1  # 0..13
-    if type_idx >= 7:  # skip King slot (index 7)
+    type_idx = piece_type - 1
+    if type_idx >= 7:
         type_idx -= 1
-    # type_idx: Pawn=0..Rook=6, ProPawn=7..Dragon=12
     color_offset = 0 if is_own else NUM_NON_KING_TYPES
     return color_offset + type_idx
 
 
 def board_feature_index(king_square: int, is_own_piece: bool,
                         piece_type: int, piece_square: int) -> int:
-    """HalfKP board feature index."""
     pt_idx = _piece_type_index(is_own_piece, piece_type)
     if pt_idx < 0:
         return -1
@@ -114,7 +115,6 @@ CSA_TO_PIECE_TYPE = {
 
 
 def _find_king_square(board: Board, side: int) -> int:
-    """Find king square for given side (1=Black, -1=White)."""
     king_piece = PT_KING * side
     for sq in range(BOARD_SIZE):
         if board.squares[sq] == king_piece:
@@ -122,11 +122,45 @@ def _find_king_square(board: Board, side: int) -> int:
     return -1
 
 
-def extract_features_from_board(board: Board) -> Tuple[List[int], List[int]]:
-    """Extract active HalfKP feature indices from a csa_parser Board.
+def _is_in_check(board: Board, side: int) -> bool:
+    """Simplified check detection for filtering training positions."""
+    king_sq = _find_king_square(board, side)
+    if king_sq < 0:
+        return True
+    king_file = (king_sq % 9) + 1
+    king_rank = (king_sq // 9) + 1
+    opp = -side
+    for sq in range(BOARD_SIZE):
+        piece = board.squares[sq]
+        if piece == 0 or (piece > 0) != (opp > 0):
+            continue
+        pt = abs(piece)
+        pf = (sq % 9) + 1
+        pr = (sq // 9) + 1
+        df = king_file - pf
+        dr = king_rank - pr
+        if pt == PT_PAWN and df == 0 and dr == opp:
+            return True
+        if pt == PT_KNIGHT and abs(df) == 1 and dr == 2 * opp:
+            return True
+        if pt in (PT_GOLD, PT_PROPAWN, PT_PROLANCE, PT_PROKNIGHT, PT_PROSILVER):
+            if abs(df) <= 1 and abs(dr) <= 1:
+                if not (dr == opp and abs(df) == 1):
+                    pass
+                if abs(df) + abs(dr) <= 2 and abs(df) <= 1 and abs(dr) <= 1:
+                    if not (dr == -opp and abs(df) == 1):
+                        return True
+        if pt == PT_SILVER:
+            if abs(df) <= 1 and abs(dr) <= 1 and abs(df) + abs(dr) > 0:
+                if (dr == opp) or (abs(df) == 1 and dr == -opp):
+                    return True
+        if pt == PT_KING:
+            if abs(df) <= 1 and abs(dr) <= 1 and abs(df) + abs(dr) > 0:
+                return True
+    return False
 
-    Returns (black_perspective_features, white_perspective_features).
-    """
+
+def extract_features_from_board(board: Board) -> Tuple[List[int], List[int]]:
     black_king_sq = _find_king_square(board, 1)
     white_king_sq = _find_king_square(board, -1)
     black_feats = []
@@ -144,31 +178,27 @@ def extract_features_from_board(board: Board) -> Tuple[List[int], List[int]]:
             continue
         piece_is_black = piece > 0
 
-        # Black perspective
         is_own_b = piece_is_black
         fi = board_feature_index(black_king_sq, is_own_b, piece_type, sq)
         if 0 <= fi < INPUT_DIM:
             black_feats.append(fi)
 
-        # White perspective
         is_own_w = not piece_is_black
         fi = board_feature_index(white_king_sq, is_own_w, piece_type, sq)
         if 0 <= fi < INPUT_DIM:
             white_feats.append(fi)
 
-    for pt in range(1, 8):  # Pawn(1) through Rook(7)
+    for pt in range(1, 8):
         hi = HAND_INDEX.get(pt)
         if hi is None:
             continue
         for color_black, hand_arr in [(True, board.black_hand), (False, board.white_hand)]:
             count = hand_arr[hi]
             for c in range(1, count + 1):
-                # Black perspective
-                fi = hand_feature_index(color_black, pt, c)  # own if color_black
+                fi = hand_feature_index(color_black, pt, c)
                 if 0 <= fi < INPUT_DIM:
                     black_feats.append(fi)
-                # White perspective
-                fi = hand_feature_index(not color_black, pt, c)  # own if NOT color_black
+                fi = hand_feature_index(not color_black, pt, c)
                 if 0 <= fi < INPUT_DIM:
                     white_feats.append(fi)
 
@@ -176,9 +206,9 @@ def extract_features_from_board(board: Board) -> Tuple[List[int], List[int]]:
 
 
 def parse_game_nnue(filepath: Path, min_rate: int = 0,
-                    skip_opening: int = 10,
-                    sample_rate: float = 0.3) -> Optional[List[dict]]:
-    """Parse CSA file, return list of {black_feats, white_feats, side_black, result}."""
+                    skip_opening: int = 24,
+                    sample_rate: float = 0.3,
+                    skip_in_check: bool = True) -> Optional[List[dict]]:
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -288,14 +318,15 @@ def parse_game_nnue(filepath: Path, min_rate: int = 0,
             promote = (pt >= 9 and current_piece < 9) if current_piece > 0 else False
 
         if ply >= skip_opening and random.random() < sample_rate:
-            bf, wf = extract_features_from_board(board)
-            result = 1.0 if black_win else -1.0
-            samples.append({
-                "black_feats": bf,
-                "white_feats": wf,
-                "side_black": side_black,
-                "result": result,
-            })
+            if not (skip_in_check and _is_in_check(board, side)):
+                bf, wf = extract_features_from_board(board)
+                result = 1.0 if black_win else -1.0
+                samples.append({
+                    "black_feats": bf,
+                    "white_feats": wf,
+                    "side_black": side_black,
+                    "result": result,
+                })
 
         board.apply_move(from_sq, to_sq, is_drop,
                          drop_piece if is_drop else pt,
@@ -320,20 +351,17 @@ class NNUEDataset(Dataset):
 
     def __getitem__(self, idx):
         s = self.samples[idx]
-        # Store as sparse indices for memory efficiency
         black_indices = [fi for fi in s["black_feats"] if 0 <= fi < INPUT_DIM]
         white_indices = [fi for fi in s["white_feats"] if 0 <= fi < INPUT_DIM]
         side = 1.0 if s["side_black"] else -1.0
-        result = s["result"] * side
+        result = s["result"] * side  # +1 = side-to-move wins, -1 = loses
         return black_indices, white_indices, np.float32(side), np.float32(result)
 
 
 def collate_sparse(batch):
-    """Custom collate that builds sparse tensors from index lists."""
     black_indices_list, white_indices_list, sides, targets = zip(*batch)
     batch_size = len(batch)
 
-    # Build sparse index pairs (batch_idx, feature_idx)
     black_rows, black_cols = [], []
     white_rows, white_cols = [], []
     for i in range(batch_size):
@@ -344,7 +372,6 @@ def collate_sparse(batch):
             white_rows.append(i)
             white_cols.append(fi)
 
-    # Create sparse tensors
     if black_rows:
         black_idx = torch.LongTensor([black_rows, black_cols])
         black_val = torch.ones(len(black_rows))
@@ -386,39 +413,87 @@ class NNUEModel(nn.Module):
         return self.l3(h2).squeeze(1)
 
 
-def export_nnue_bin(model: NNUEModel, path: str):
-    """Export trained model to NNU3 binary format matching nnue.cpp's load().
+def sigmoid_loss(pred, target, scale=EVAL_SCALE):
+    """Sigmoid cross-entropy loss.
 
-    L0 weights are quantized to int16 (scaled by WEIGHT_SCALE=64).
-    L0 biases are stored as int32 (scaled by WEIGHT_SCALE).
-    L1-L3 weights and biases remain float32.
+    pred: raw network output (before sigmoid)
+    target: probability of side-to-move winning (0.0 or 1.0, or soft label 0..1)
     """
+    scaled = pred / scale
+    return F.binary_cross_entropy_with_logits(scaled, target, reduction='mean')
+
+
+def bootstrap_labels(model, dataset, device, lambda_blend=0.5, batch_size=8192):
+    """Replace binary game outcomes with blended labels using model predictions."""
+    model.eval()
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                        collate_fn=collate_sparse, num_workers=0)
+    soft_labels = []
+    with torch.no_grad():
+        for black_sparse, white_sparse, side, target in tqdm(loader, desc="Bootstrapping"):
+            black_vec = black_sparse.to_dense().to(device)
+            white_vec = white_sparse.to_dense().to(device)
+            side_d = side.to(device)
+            raw_pred = model(black_vec, white_vec, side_d)
+            engine_prob = torch.sigmoid(raw_pred / EVAL_SCALE)
+            game_prob = (target + 1.0) / 2.0  # -1..+1 -> 0..1
+            blended = lambda_blend * engine_prob.cpu() + (1.0 - lambda_blend) * game_prob
+            soft_labels.append(blended)
+
+    soft_labels = torch.cat(soft_labels).numpy()
+    for i, s in enumerate(dataset.samples):
+        # Store as probability (0..1) for sigmoid loss
+        dataset.samples[i]["soft_label"] = float(soft_labels[i])
+    return dataset
+
+
+class NNUEDatasetWithSoftLabels(Dataset):
+    def __init__(self, samples: List[dict]):
+        self.samples = samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        s = self.samples[idx]
+        black_indices = [fi for fi in s["black_feats"] if 0 <= fi < INPUT_DIM]
+        white_indices = [fi for fi in s["white_feats"] if 0 <= fi < INPUT_DIM]
+        side = 1.0 if s["side_black"] else -1.0
+        if "soft_label" in s:
+            label = s["soft_label"]
+        else:
+            result = s["result"] * side
+            label = (result + 1.0) / 2.0  # -1..+1 -> 0..1
+        return black_indices, white_indices, np.float32(side), np.float32(label)
+
+
+def export_nnue_bin(model_or_module: nn.Module, path: str):
+    """Export trained model to NNU3 binary format.
+
+    Unwraps DataParallel if needed.
+    """
+    model = model_or_module.module if isinstance(model_or_module, nn.DataParallel) else model_or_module
+
     with open(path, "wb") as f:
         f.write(b"NNU3")
-        # l0Weights_[INPUT_DIM][L0_SIZE] as int16
-        w0 = model.l0.weight.data.t().cpu()  # [INPUT_DIM, L0_SIZE]
+        w0 = model.l0.weight.data.t().cpu()
         w0_q = (w0 * WEIGHT_SCALE).round().clamp(-32768, 32767).to(torch.int16)
         f.write(w0_q.numpy().tobytes())
-        # l0Biases_[L0_SIZE] as int32
         b0 = model.l0.bias.data.cpu()
         b0_q = (b0 * WEIGHT_SCALE).round().clamp(-2147483648, 2147483647).to(torch.int32)
         f.write(b0_q.numpy().tobytes())
-        # l1Weights_[2*L0_SIZE][L1_SIZE] as float32
         w1 = model.l1.weight.data.t().cpu().numpy()
         f.write(w1.astype(np.float32).tobytes())
         f.write(model.l1.bias.data.cpu().numpy().astype(np.float32).tobytes())
-        # l2Weights_[L1_SIZE][L2_SIZE] as float32
         w2 = model.l2.weight.data.t().cpu().numpy()
         f.write(w2.astype(np.float32).tobytes())
         f.write(model.l2.bias.data.cpu().numpy().astype(np.float32).tobytes())
-        # l3Weights_[L2_SIZE] as float32
         f.write(model.l3.weight.data.squeeze(0).cpu().numpy().astype(np.float32).tobytes())
         f.write(model.l3.bias.data.cpu().numpy().astype(np.float32).tobytes())
     print(f"Exported NNU3 weights to {path}")
 
 
 def load_index(kifu_dir: str) -> list:
-    """Load or build index of CSA kifu files."""
     kifu_path = Path(kifu_dir)
     files = sorted(kifu_path.rglob("*.csa"))
     return files
@@ -429,15 +504,20 @@ def main():
     parser.add_argument("--kifu", required=True, help="Kifu directory")
     parser.add_argument("--output", default="nnue.bin", help="Output binary weights (default: nnue.bin)")
     parser.add_argument("--model-pt", default="nnue_model.pt", help="PyTorch checkpoint (default: nnue_model.pt)")
-    parser.add_argument("--min-rate", type=int, default=1500, help="Minimum player rating (default: 1500)")
+    parser.add_argument("--min-rate", type=int, default=2500, help="Minimum player rating (default: 2500)")
     parser.add_argument("--max-games", type=int, default=0, help="Max games to process (0=all)")
-    parser.add_argument("--skip-opening", type=int, default=10, help="Skip first N half-moves (default: 10)")
+    parser.add_argument("--skip-opening", type=int, default=24, help="Skip first N half-moves (default: 24)")
     parser.add_argument("--sample-rate", type=float, default=0.3, help="Position sampling rate (default: 0.3)")
-    parser.add_argument("--epochs", type=int, default=5, help="Training epochs (default: 5)")
-    parser.add_argument("--batch-size", type=int, default=4096, help="Batch size (default: 4096)")
+    parser.add_argument("--epochs", type=int, default=20, help="Training epochs (default: 20)")
+    parser.add_argument("--batch-size", type=int, default=65536, help="Batch size (default: 65536)")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate (default: 1e-3)")
     parser.add_argument("--workers", type=int, default=0, help="Parallel parsing workers (0=auto)")
     parser.add_argument("--resume", default="", help="Resume from PyTorch checkpoint")
+    parser.add_argument("--bootstrap", default="", help="Path to existing model checkpoint for eval bootstrapping")
+    parser.add_argument("--lambda-blend", type=float, default=0.5,
+                        help="Bootstrap blend: lambda*engine + (1-lambda)*outcome (default: 0.5)")
+    parser.add_argument("--loss", choices=["sigmoid", "mse"], default="sigmoid",
+                        help="Loss function: sigmoid (default) or mse (legacy)")
     args = parser.parse_args()
 
     print("Loading kifu index...")
@@ -469,20 +549,44 @@ def main():
     random.shuffle(all_samples)
 
     split = int(len(all_samples) * 0.95)
-    train_data = NNUEDataset(all_samples[:split])
-    val_data = NNUEDataset(all_samples[split:])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    num_gpus = torch.cuda.device_count() if device.type == "cuda" else 0
+    print(f"Device: {device} (GPUs: {num_gpus})")
 
     model = NNUEModel().to(device)
     if args.resume and os.path.exists(args.resume):
         model.load_state_dict(torch.load(args.resume, map_location=device, weights_only=True))
         print(f"Resumed from {args.resume}")
 
+    # Eval bootstrapping
+    use_sigmoid = (args.loss == "sigmoid")
+    if args.bootstrap and os.path.exists(args.bootstrap):
+        boot_model = NNUEModel().to(device)
+        boot_model.load_state_dict(torch.load(args.bootstrap, map_location=device, weights_only=True))
+        print(f"Bootstrapping with model: {args.bootstrap} (lambda={args.lambda_blend})")
+        boot_dataset = NNUEDatasetWithSoftLabels(all_samples)
+        boot_dataset = bootstrap_labels(boot_model, boot_dataset, device,
+                                         lambda_blend=args.lambda_blend)
+        train_data = NNUEDatasetWithSoftLabels(boot_dataset.samples[:split])
+        val_data = NNUEDatasetWithSoftLabels(boot_dataset.samples[split:])
+        del boot_model
+        use_sigmoid = True
+    else:
+        if use_sigmoid:
+            train_data = NNUEDatasetWithSoftLabels(all_samples[:split])
+            val_data = NNUEDatasetWithSoftLabels(all_samples[split:])
+        else:
+            train_data = NNUEDataset(all_samples[:split])
+            val_data = NNUEDataset(all_samples[split:])
+
+    # Multi-GPU
+    if num_gpus > 1:
+        print(f"Using DataParallel with {num_gpus} GPUs")
+        model = nn.DataParallel(model)
+
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    loss_fn = nn.MSELoss()
 
     dl_workers = 0 if sys.platform == "win32" else min(4, workers)
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
@@ -491,6 +595,12 @@ def main():
     val_loader = DataLoader(val_data, batch_size=args.batch_size * 2, shuffle=False,
                             num_workers=dl_workers, pin_memory=device.type == "cuda",
                             collate_fn=collate_sparse)
+
+    if use_sigmoid:
+        print(f"Loss: sigmoid cross-entropy (scale={EVAL_SCALE})")
+    else:
+        print("Loss: MSE + tanh (legacy)")
+    loss_fn_mse = nn.MSELoss()
 
     best_val_loss = float("inf")
     for epoch in range(1, args.epochs + 1):
@@ -503,8 +613,11 @@ def main():
             side = side.to(device)
             target = target.to(device)
 
-            pred = torch.tanh(model(black_vec, white_vec, side))
-            loss = loss_fn(pred, target)
+            pred = model(black_vec, white_vec, side)
+            if use_sigmoid:
+                loss = sigmoid_loss(pred, target)
+            else:
+                loss = loss_fn_mse(torch.tanh(pred), target)
 
             optimizer.zero_grad()
             loss.backward()
@@ -525,8 +638,11 @@ def main():
                 white_vec = white_sparse.to_dense().to(device)
                 side = side.to(device)
                 target = target.to(device)
-                pred = torch.tanh(model(black_vec, white_vec, side))
-                val_loss += loss_fn(pred, target).item() * len(target)
+                pred = model(black_vec, white_vec, side)
+                if use_sigmoid:
+                    val_loss += sigmoid_loss(pred, target).item() * len(target)
+                else:
+                    val_loss += loss_fn_mse(torch.tanh(pred), target).item() * len(target)
                 val_n += len(target)
 
         tl = train_loss / max(train_n, 1)
@@ -535,7 +651,8 @@ def main():
 
         if vl < best_val_loss:
             best_val_loss = vl
-            torch.save(model.state_dict(), args.model_pt)
+            raw_model = model.module if isinstance(model, nn.DataParallel) else model
+            torch.save(raw_model.state_dict(), args.model_pt)
             export_nnue_bin(model, args.output)
             print(f"  -> Best model saved (val_loss={vl:.6f})")
 
