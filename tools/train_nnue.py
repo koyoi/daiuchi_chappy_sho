@@ -7,6 +7,9 @@ The training signal is win/loss outcome: each position is labeled +1 or -1
 depending on whether the side to move eventually won. The network learns
 to predict the game outcome as a score.
 
+Uses HalfKP features: kingSquare(81) x coloredPieceType(26) x pieceSquare(81)
+plus hand piece features (76 dims). Total input = 170662 sparse binary features.
+
 Usage:
   python tools/train_nnue.py --kifu kifu/floodgate
   python tools/train_nnue.py --kifu kifu/floodgate --epochs 10 --lr 1e-3 --batch-size 4096
@@ -48,13 +51,18 @@ except ImportError:
 
 # --- NNUE feature constants (must match nnue.h) ---
 NUM_PIECE_TYPES = 14
+NUM_NON_KING_TYPES = 13
+NUM_COLORED_PIECE_TYPES = 2 * NUM_NON_KING_TYPES  # 26
 BOARD_SIZE = 81
-BOARD_FEATURES = 2 * NUM_PIECE_TYPES * BOARD_SIZE   # 2268
-HAND_MAX = {1: 18, 2: 4, 3: 4, 4: 4, 5: 4, 6: 2, 7: 2}  # PieceType -> max count
+
+# HalfKP: kingSquare(81) x coloredPieceType(26) x pieceSquare(81)
+BOARD_FEATURES = BOARD_SIZE * NUM_COLORED_PIECE_TYPES * BOARD_SIZE  # 170586
+
+HAND_MAX = {1: 18, 2: 4, 3: 4, 4: 4, 5: 4, 6: 2, 7: 2}
 HAND_TYPE_OFFSET = {1: 0, 2: 18, 3: 22, 4: 26, 5: 30, 6: 34, 7: 36}
 HAND_FEATURES_PER_COLOR = 38
 HAND_FEATURES = 2 * HAND_FEATURES_PER_COLOR  # 76
-INPUT_DIM = BOARD_FEATURES + HAND_FEATURES   # 2344
+INPUT_DIM = BOARD_FEATURES + HAND_FEATURES   # 170662
 
 L0_SIZE = 256
 L1_SIZE = 64
@@ -68,21 +76,32 @@ PT_PROPAWN = 9; PT_PROLANCE = 10; PT_PROKNIGHT = 11; PT_PROSILVER = 12
 PT_HORSE = 13; PT_DRAGON = 14
 
 
-def board_feature_index(perspective_is_black: bool, piece_is_black: bool,
-                        piece_type: int, square: int) -> int:
-    is_own = (piece_is_black == perspective_is_black)
-    color_offset = 0 if is_own else NUM_PIECE_TYPES * BOARD_SIZE
-    type_idx = piece_type - 1
-    return color_offset + type_idx * BOARD_SIZE + square
+def _piece_type_index(is_own: bool, piece_type: int) -> int:
+    """Map piece type to HalfKP index (0..25). Returns -1 for King."""
+    if piece_type == PT_KING:
+        return -1
+    type_idx = piece_type - 1  # 0..13
+    if type_idx >= 7:  # skip King slot (index 7)
+        type_idx -= 1
+    # type_idx: Pawn=0..Rook=6, ProPawn=7..Dragon=12
+    color_offset = 0 if is_own else NUM_NON_KING_TYPES
+    return color_offset + type_idx
 
 
-def hand_feature_index(perspective_is_black: bool, hand_is_black: bool,
-                       piece_type: int, count: int) -> int:
+def board_feature_index(king_square: int, is_own_piece: bool,
+                        piece_type: int, piece_square: int) -> int:
+    """HalfKP board feature index."""
+    pt_idx = _piece_type_index(is_own_piece, piece_type)
+    if pt_idx < 0:
+        return -1
+    return king_square * NUM_COLORED_PIECE_TYPES * BOARD_SIZE + pt_idx * BOARD_SIZE + piece_square
+
+
+def hand_feature_index(is_own_hand: bool, piece_type: int, count: int) -> int:
     if count <= 0 or piece_type not in HAND_TYPE_OFFSET:
         return -1
-    is_own = (hand_is_black == perspective_is_black)
     offset = HAND_TYPE_OFFSET[piece_type]
-    color_offset = 0 if is_own else HAND_FEATURES_PER_COLOR
+    color_offset = 0 if is_own_hand else HAND_FEATURES_PER_COLOR
     return BOARD_FEATURES + color_offset + offset + (count - 1)
 
 
@@ -94,38 +113,64 @@ CSA_TO_PIECE_TYPE = {
 }
 
 
+def _find_king_square(board: Board, side: int) -> int:
+    """Find king square for given side (1=Black, -1=White)."""
+    king_piece = PT_KING * side
+    for sq in range(BOARD_SIZE):
+        if board.squares[sq] == king_piece:
+            return sq
+    return -1
+
+
 def extract_features_from_board(board: Board) -> Tuple[List[int], List[int]]:
-    """Extract active NNUE feature indices from a csa_parser Board.
+    """Extract active HalfKP feature indices from a csa_parser Board.
 
     Returns (black_perspective_features, white_perspective_features).
-    Board.squares is a flat 81-element array; piece encoding: positive=Black, negative=White.
-    HAND_INDEX maps piece type int (1-7) to hand array index (0-6).
     """
+    black_king_sq = _find_king_square(board, 1)
+    white_king_sq = _find_king_square(board, -1)
     black_feats = []
     white_feats = []
+
+    if black_king_sq < 0 or white_king_sq < 0:
+        return black_feats, white_feats
 
     for sq in range(BOARD_SIZE):
         piece = board.squares[sq]
         if piece == 0:
             continue
+        piece_type = abs(piece)
+        if piece_type == PT_KING:
+            continue
         piece_is_black = piece > 0
-        piece_type = abs(piece)  # already 1-14 matching our PT_ constants
-        for persp_black, feat_list in [(True, black_feats), (False, white_feats)]:
-            fi = board_feature_index(persp_black, piece_is_black, piece_type, sq)
-            if 0 <= fi < INPUT_DIM:
-                feat_list.append(fi)
+
+        # Black perspective
+        is_own_b = piece_is_black
+        fi = board_feature_index(black_king_sq, is_own_b, piece_type, sq)
+        if 0 <= fi < INPUT_DIM:
+            black_feats.append(fi)
+
+        # White perspective
+        is_own_w = not piece_is_black
+        fi = board_feature_index(white_king_sq, is_own_w, piece_type, sq)
+        if 0 <= fi < INPUT_DIM:
+            white_feats.append(fi)
 
     for pt in range(1, 8):  # Pawn(1) through Rook(7)
         hi = HAND_INDEX.get(pt)
         if hi is None:
             continue
-        for color_black, hand in [(True, board.black_hand), (False, board.white_hand)]:
-            count = hand[hi]
+        for color_black, hand_arr in [(True, board.black_hand), (False, board.white_hand)]:
+            count = hand_arr[hi]
             for c in range(1, count + 1):
-                for persp_black, feat_list in [(True, black_feats), (False, white_feats)]:
-                    fi = hand_feature_index(persp_black, color_black, pt, c)
-                    if 0 <= fi < INPUT_DIM:
-                        feat_list.append(fi)
+                # Black perspective
+                fi = hand_feature_index(color_black, pt, c)  # own if color_black
+                if 0 <= fi < INPUT_DIM:
+                    black_feats.append(fi)
+                # White perspective
+                fi = hand_feature_index(not color_black, pt, c)  # own if NOT color_black
+                if 0 <= fi < INPUT_DIM:
+                    white_feats.append(fi)
 
     return black_feats, white_feats
 
@@ -133,10 +178,7 @@ def extract_features_from_board(board: Board) -> Tuple[List[int], List[int]]:
 def parse_game_nnue(filepath: Path, min_rate: int = 0,
                     skip_opening: int = 10,
                     sample_rate: float = 0.3) -> Optional[List[dict]]:
-    """Parse CSA file, return list of {black_feats, white_feats, side_black, result}.
-
-    Follows the same parsing logic as csa_parser.parse_game().
-    """
+    """Parse CSA file, return list of {black_feats, white_feats, side_black, result}."""
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -145,7 +187,6 @@ def parse_game_nnue(filepath: Path, min_rate: int = 0,
 
     lines = [l.rstrip("\n\r") for l in lines]
 
-    # --- Result ---
     result_line = None
     for line in lines:
         if line.startswith("'summary:"):
@@ -171,7 +212,6 @@ def parse_game_nnue(filepath: Path, min_rate: int = 0,
     if black_win is None:
         return None
 
-    # --- Ratings (use 'black_rate:'/'white_rate:' format) ---
     if min_rate > 0:
         black_rate = 0
         white_rate = 0
@@ -187,7 +227,6 @@ def parse_game_nnue(filepath: Path, min_rate: int = 0,
         if black_rate < min_rate or white_rate < min_rate:
             return None
 
-    # --- Initial board ---
     board_setup_lines = [l for l in lines if re.match(r"^P[1-9+\-]", l)]
     if is_hirate(lines):
         std_lines = [
@@ -205,7 +244,6 @@ def parse_game_nnue(filepath: Path, min_rate: int = 0,
     else:
         board = parse_csa_initial_board(board_setup_lines)
 
-    # --- Initial side ---
     for line in lines:
         if line == "+":
             board.side = 1
@@ -214,7 +252,6 @@ def parse_game_nnue(filepath: Path, min_rate: int = 0,
             board.side = -1
             break
 
-    # --- Collect move lines ---
     move_lines = []
     for line in lines:
         if len(line) >= 7 and line[0] in ('+', '-') and line[1].isdigit():
@@ -223,7 +260,6 @@ def parse_game_nnue(filepath: Path, min_rate: int = 0,
     if len(move_lines) < 10:
         return None
 
-    # --- Replay game and sample positions ---
     samples = []
     for ply, mline in enumerate(move_lines):
         side = 1 if mline[0] == '+' else -1
@@ -251,7 +287,6 @@ def parse_game_nnue(filepath: Path, min_rate: int = 0,
             current_piece = abs(board.squares[from_sq]) if from_sq >= 0 else 0
             promote = (pt >= 9 and current_piece < 9) if current_piece > 0 else False
 
-        # Sample position BEFORE applying the move
         if ply >= skip_opening and random.random() < sample_rate:
             bf, wf = extract_features_from_board(board)
             result = 1.0 if black_win else -1.0
@@ -262,7 +297,6 @@ def parse_game_nnue(filepath: Path, min_rate: int = 0,
                 "result": result,
             })
 
-        # Apply move using Board.apply_move()
         board.apply_move(from_sq, to_sq, is_drop,
                          drop_piece if is_drop else pt,
                          promote, side)
@@ -286,17 +320,50 @@ class NNUEDataset(Dataset):
 
     def __getitem__(self, idx):
         s = self.samples[idx]
-        black_vec = np.zeros(INPUT_DIM, dtype=np.float32)
-        white_vec = np.zeros(INPUT_DIM, dtype=np.float32)
-        for fi in s["black_feats"]:
-            if 0 <= fi < INPUT_DIM:
-                black_vec[fi] = 1.0
-        for fi in s["white_feats"]:
-            if 0 <= fi < INPUT_DIM:
-                white_vec[fi] = 1.0
+        # Store as sparse indices for memory efficiency
+        black_indices = [fi for fi in s["black_feats"] if 0 <= fi < INPUT_DIM]
+        white_indices = [fi for fi in s["white_feats"] if 0 <= fi < INPUT_DIM]
         side = 1.0 if s["side_black"] else -1.0
         result = s["result"] * side
-        return black_vec, white_vec, np.float32(side), np.float32(result)
+        return black_indices, white_indices, np.float32(side), np.float32(result)
+
+
+def collate_sparse(batch):
+    """Custom collate that builds sparse tensors from index lists."""
+    black_indices_list, white_indices_list, sides, targets = zip(*batch)
+    batch_size = len(batch)
+
+    # Build sparse index pairs (batch_idx, feature_idx)
+    black_rows, black_cols = [], []
+    white_rows, white_cols = [], []
+    for i in range(batch_size):
+        for fi in black_indices_list[i]:
+            black_rows.append(i)
+            black_cols.append(fi)
+        for fi in white_indices_list[i]:
+            white_rows.append(i)
+            white_cols.append(fi)
+
+    # Create sparse tensors
+    if black_rows:
+        black_idx = torch.LongTensor([black_rows, black_cols])
+        black_val = torch.ones(len(black_rows))
+        black_sparse = torch.sparse_coo_tensor(black_idx, black_val, (batch_size, INPUT_DIM))
+    else:
+        black_sparse = torch.sparse_coo_tensor(torch.zeros(2, 0, dtype=torch.long),
+                                                torch.zeros(0), (batch_size, INPUT_DIM))
+
+    if white_rows:
+        white_idx = torch.LongTensor([white_rows, white_cols])
+        white_val = torch.ones(len(white_rows))
+        white_sparse = torch.sparse_coo_tensor(white_idx, white_val, (batch_size, INPUT_DIM))
+    else:
+        white_sparse = torch.sparse_coo_tensor(torch.zeros(2, 0, dtype=torch.long),
+                                                torch.zeros(0), (batch_size, INPUT_DIM))
+
+    sides_t = torch.stack([torch.tensor(s) for s in sides])
+    targets_t = torch.stack([torch.tensor(t) for t in targets])
+    return black_sparse, white_sparse, sides_t, targets_t
 
 
 class NNUEModel(nn.Module):
@@ -320,14 +387,14 @@ class NNUEModel(nn.Module):
 
 
 def export_nnue_bin(model: NNUEModel, path: str):
-    """Export trained model to NNU2 binary format matching nnue.cpp's load().
+    """Export trained model to NNU3 binary format matching nnue.cpp's load().
 
     L0 weights are quantized to int16 (scaled by WEIGHT_SCALE=64).
     L0 biases are stored as int32 (scaled by WEIGHT_SCALE).
     L1-L3 weights and biases remain float32.
     """
     with open(path, "wb") as f:
-        f.write(b"NNU2")
+        f.write(b"NNU3")
         # l0Weights_[INPUT_DIM][L0_SIZE] as int16
         w0 = model.l0.weight.data.t().cpu()  # [INPUT_DIM, L0_SIZE]
         w0_q = (w0 * WEIGHT_SCALE).round().clamp(-32768, 32767).to(torch.int16)
@@ -347,7 +414,7 @@ def export_nnue_bin(model: NNUEModel, path: str):
         # l3Weights_[L2_SIZE] as float32
         f.write(model.l3.weight.data.squeeze(0).cpu().numpy().astype(np.float32).tobytes())
         f.write(model.l3.bias.data.cpu().numpy().astype(np.float32).tobytes())
-    print(f"Exported NNU2 weights to {path}")
+    print(f"Exported NNU3 weights to {path}")
 
 
 def load_index(kifu_dir: str) -> list:
@@ -419,18 +486,20 @@ def main():
 
     dl_workers = 0 if sys.platform == "win32" else min(4, workers)
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
-                              num_workers=dl_workers, pin_memory=device.type == "cuda")
+                              num_workers=dl_workers, pin_memory=device.type == "cuda",
+                              collate_fn=collate_sparse)
     val_loader = DataLoader(val_data, batch_size=args.batch_size * 2, shuffle=False,
-                            num_workers=dl_workers, pin_memory=device.type == "cuda")
+                            num_workers=dl_workers, pin_memory=device.type == "cuda",
+                            collate_fn=collate_sparse)
 
     best_val_loss = float("inf")
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_loss = 0.0
         train_n = 0
-        for black_vec, white_vec, side, target in tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}"):
-            black_vec = black_vec.to(device)
-            white_vec = white_vec.to(device)
+        for black_sparse, white_sparse, side, target in tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}"):
+            black_vec = black_sparse.to_dense().to(device)
+            white_vec = white_sparse.to_dense().to(device)
             side = side.to(device)
             target = target.to(device)
 
@@ -451,9 +520,9 @@ def main():
         val_loss = 0.0
         val_n = 0
         with torch.no_grad():
-            for black_vec, white_vec, side, target in val_loader:
-                black_vec = black_vec.to(device)
-                white_vec = white_vec.to(device)
+            for black_sparse, white_sparse, side, target in val_loader:
+                black_vec = black_sparse.to_dense().to(device)
+                white_vec = white_sparse.to_dense().to(device)
                 side = side.to(device)
                 target = target.to(device)
                 pred = torch.tanh(model(black_vec, white_vec, side))

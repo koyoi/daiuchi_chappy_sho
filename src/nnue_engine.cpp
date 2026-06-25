@@ -133,7 +133,7 @@ void NNUEEngine::workerSearch(const Board& board, const MoveList& legal,
             auto delta = nnue_.computeMoveDelta(board, moves[i]);
             Board next = board;
             applyMove(next, moves[i]);
-            nnue_.updateAccumulatorIncremental(accStack[0], delta, accStack[1]);
+            nnue_.updateAccumulatorIncremental(next, accStack[0], delta, accStack[1]);
             int sd = depth - 1;
             if (pw > 0 && depth >= 3 && i >= pw) sd = std::max(0, depth - 3);
             scores[i] = -search(next, sd, 1, -MateScore, MateScore, true, moves[i]);
@@ -271,7 +271,7 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
                 auto delta = nnue_.computeMoveDelta(board, legal[i]);
                 Board next = board;
                 applyMove(next, legal[i]);
-                nnue_.updateAccumulatorIncremental(accStack[0], delta, accStack[1]);
+                nnue_.updateAccumulatorIncremental(next, accStack[0], delta, accStack[1]);
                 int sd = depth - 1;
                 if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) sd = std::max(0, depth - 3);
                 int val = -search(next, sd, 1, -aspirationBeta, -runningAlpha, true, legal[i]);
@@ -291,7 +291,7 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
                     auto delta = nnue_.computeMoveDelta(board, legal[i]);
                     Board next = board;
                     applyMove(next, legal[i]);
-                    nnue_.updateAccumulatorIncremental(accStack[0], delta, accStack[1]);
+                    nnue_.updateAccumulatorIncremental(next, accStack[0], delta, accStack[1]);
                     int sd = depth - 1;
                     if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) sd = std::max(0, depth - 3);
                     int val = -search(next, sd, 1, -MateScore, -runningAlpha, true, legal[i]);
@@ -472,7 +472,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bo
         auto delta = nnue_.computeMoveDelta(board, move);
         UndoInfo undo;
         applyMove(board, move, undo);
-        if (ply + 1 < AccStackSize) nnue_.updateAccumulatorIncremental(accStack[ply], delta, accStack[ply + 1]);
+        if (ply + 1 < AccStackSize) nnue_.updateAccumulatorIncremental(board, accStack[ply], delta, accStack[ply + 1]);
         const bool givesCheckNow = isKingAttacked(board, board.side);
         int extension = (givesCheckNow && ply < MaxPly - 10) ? 1 : 0;
         const int newDepth = depth - 1 + extension;
@@ -561,7 +561,7 @@ int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta
         auto delta = nnue_.computeMoveDelta(board, move);
         UndoInfo undo;
         applyMove(board, move, undo);
-        if (ply + 1 < AccStackSize) nnue_.updateAccumulatorIncremental(accStack[ply], delta, accStack[ply + 1]);
+        if (ply + 1 < AccStackSize) nnue_.updateAccumulatorIncremental(board, accStack[ply], delta, accStack[ply + 1]);
         int val = -quiescence(board, depth - 1, ply + 1, -beta, -alpha);
         undoMove(board, move, undo);
         if (val > best) best = val;

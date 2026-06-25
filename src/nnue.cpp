@@ -23,26 +23,35 @@ static int handTypeOffset(PieceType type) {
     }
 }
 
-int boardFeatureIndex(Color perspective, int pieceColor, PieceType type, int square) {
-    bool isOwn = (pieceColor == static_cast<int>(perspective));
-    int colorOffset = isOwn ? 0 : NumPieceTypes * BoardSize;
-    int typeIdx = static_cast<int>(type) - 1;
-    return colorOffset + typeIdx * BoardSize + square;
+static int pieceTypeIndex(bool isOwn, PieceType type) {
+    // King is excluded from HalfKP board features
+    if (type == King) return -1;
+    int typeIdx = static_cast<int>(type) - 1; // 0..13, but King(8)->7 excluded
+    if (typeIdx >= 7) typeIdx -= 1; // shift promoted pieces down (skip King slot)
+    // typeIdx now: Pawn=0,Lance=1,Knight=2,Silver=3,Gold=4,Bishop=5,Rook=6,
+    //   ProPawn=7,ProLance=8,ProKnight=9,ProSilver=10,Horse=11,Dragon=12
+    int colorOffset = isOwn ? 0 : NumNonKingTypes;
+    return colorOffset + typeIdx;
 }
 
-int handFeatureIndex(Color perspective, Color handColor, PieceType type, int count) {
+int boardFeatureIndex(int kingSquare, bool isOwnPiece, PieceType type, int pieceSquare) {
+    int ptIdx = pieceTypeIndex(isOwnPiece, type);
+    if (ptIdx < 0) return -1;
+    return kingSquare * NumColoredPieceTypes * BoardSize + ptIdx * BoardSize + pieceSquare;
+}
+
+int handFeatureIndex(bool isOwnHand, PieceType type, int count) {
     if (count <= 0) return -1;
     int offset = handTypeOffset(type);
     if (offset < 0) return -1;
-    bool isOwn = (handColor == perspective);
-    int base = BoardFeatures;
-    int colorOffset = isOwn ? 0 : HandFeaturesPerColor;
-    return base + colorOffset + offset + (count - 1);
+    int colorOffset = isOwnHand ? 0 : HandFeaturesPerColor;
+    return BoardFeatures + colorOffset + offset + (count - 1);
 }
 
 } // namespace nnue
 
 NNUENetwork::NNUENetwork() {
+    l0Weights_.resize(static_cast<std::size_t>(nnue::InputDim) * nnue::L0Size, 0);
     initRandom();
 }
 
@@ -54,9 +63,9 @@ void NNUENetwork::initRandom() {
         return dist(rng);
     };
 
-    for (int i = 0; i < nnue::InputDim; ++i)
-        for (int j = 0; j < nnue::L0Size; ++j)
-            l0Weights_[i][j] = static_cast<std::int16_t>(std::round(he(nnue::InputDim) * nnue::WeightScale));
+    l0Weights_.resize(static_cast<std::size_t>(nnue::InputDim) * nnue::L0Size);
+    for (std::size_t i = 0; i < l0Weights_.size(); ++i)
+        l0Weights_[i] = static_cast<std::int16_t>(std::round(he(nnue::InputDim) * nnue::WeightScale));
     for (int j = 0; j < nnue::L0Size; ++j)
         l0Biases_[j] = 0;
 
@@ -80,8 +89,9 @@ void NNUENetwork::computeAccumulator(const std::vector<int>& activeFeatures, std
     std::copy(std::begin(l0Biases_), std::end(l0Biases_), output);
     for (int fi : activeFeatures) {
         if (fi < 0 || fi >= nnue::InputDim) continue;
+        const std::int16_t* w = &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size];
         for (int j = 0; j < nnue::L0Size; ++j) {
-            output[j] += l0Weights_[fi][j];
+            output[j] += w[j];
         }
     }
 }
@@ -90,24 +100,31 @@ static std::vector<int> extractActiveFeatures(const Board& board, Color perspect
     std::vector<int> features;
     features.reserve(64);
 
+    const int kingSquare = (perspective == Black) ? board.blackKingSquare : board.whiteKingSquare;
+    if (kingSquare < 0) return features;
+
     for (int sq = 0; sq < BoardSize; ++sq) {
         int piece = board.squares[sq];
         if (piece == 0) continue;
         PieceType type = typeOf(piece);
+        if (type == King) continue;
         int pieceColor = colorOf(piece);
-        int fi = nnue::boardFeatureIndex(perspective, pieceColor, type, sq);
-        features.push_back(fi);
+        bool isOwn = (pieceColor == static_cast<int>(perspective));
+        int fi = nnue::boardFeatureIndex(kingSquare, isOwn, type, sq);
+        if (fi >= 0) features.push_back(fi);
     }
 
     for (PieceType pt : {Pawn, Lance, Knight, Silver, Gold, Bishop, Rook}) {
         int bc = hand(board, Black)[pt];
         for (int c = 1; c <= bc; ++c) {
-            int fi = nnue::handFeatureIndex(perspective, Black, pt, c);
+            bool isOwn = (perspective == Black);
+            int fi = nnue::handFeatureIndex(isOwn, pt, c);
             if (fi >= 0) features.push_back(fi);
         }
         int wc = hand(board, White)[pt];
         for (int c = 1; c <= wc; ++c) {
-            int fi = nnue::handFeatureIndex(perspective, White, pt, c);
+            bool isOwn = (perspective == White);
+            int fi = nnue::handFeatureIndex(isOwn, pt, c);
             if (fi >= 0) features.push_back(fi);
         }
     }
@@ -120,34 +137,67 @@ nnue::FeatureDelta NNUENetwork::computeMoveDelta(const Board& board, const Move&
     const Color mover = board.side;
     const int moverColor = static_cast<int>(mover);
 
+    const int blackKingSq = board.blackKingSquare;
+    const int whiteKingSq = board.whiteKingSquare;
+
+    bool movingKing = false;
+    if (!move.isDrop() && typeOf(board.squares[move.from]) == King) {
+        movingKing = true;
+    }
+
     for (Color perspective : {Black, White}) {
         int* removed = perspective == Black ? delta.blackRemoved : delta.whiteRemoved;
         int* added = perspective == Black ? delta.blackAdded : delta.whiteAdded;
         int& nRemoved = perspective == Black ? delta.numBlackRemoved : delta.numWhiteRemoved;
         int& nAdded = perspective == Black ? delta.numBlackAdded : delta.numWhiteAdded;
+        bool& needsRecompute = perspective == Black ? delta.blackNeedsFullRecompute : delta.whiteNeedsFullRecompute;
+
+        if (movingKing && mover == perspective) {
+            needsRecompute = true;
+            continue;
+        }
+
+        const int kingSq = (perspective == Black) ? blackKingSq : whiteKingSq;
+        if (kingSq < 0) { needsRecompute = true; continue; }
 
         if (move.isDrop()) {
-            added[nAdded++] = nnue::boardFeatureIndex(perspective, moverColor, move.drop, move.to);
+            PieceType dropType = move.drop;
+            if (dropType != King) {
+                bool isOwn = (moverColor == static_cast<int>(perspective));
+                int fi = nnue::boardFeatureIndex(kingSq, isOwn, dropType, move.to);
+                if (fi >= 0) added[nAdded++] = fi;
+            }
 
             const int oldCount = hand(board, mover)[move.drop];
-            int fi = nnue::handFeatureIndex(perspective, mover, move.drop, oldCount);
+            int fi = nnue::handFeatureIndex(mover == perspective, move.drop, oldCount);
             if (fi >= 0) removed[nRemoved++] = fi;
         } else {
-            removed[nRemoved++] = nnue::boardFeatureIndex(perspective, moverColor, move.piece, move.from);
+            PieceType movingPiece = move.piece;
+            if (movingPiece != King) {
+                bool isOwn = (moverColor == static_cast<int>(perspective));
+                int fi = nnue::boardFeatureIndex(kingSq, isOwn, movingPiece, move.from);
+                if (fi >= 0) removed[nRemoved++] = fi;
 
-            PieceType finalType = move.promote ? promote(move.piece) : move.piece;
-            added[nAdded++] = nnue::boardFeatureIndex(perspective, moverColor, finalType, move.to);
+                PieceType finalType = move.promote ? promote(movingPiece) : movingPiece;
+                fi = nnue::boardFeatureIndex(kingSq, isOwn, finalType, move.to);
+                if (fi >= 0) added[nAdded++] = fi;
+            }
 
             int captured = board.squares[move.to];
             if (captured != 0) {
                 int capColor = colorOf(captured);
                 PieceType capType = typeOf(captured);
-                removed[nRemoved++] = nnue::boardFeatureIndex(perspective, capColor, capType, move.to);
+                if (capType != King) {
+                    bool capIsOwn = (capColor == static_cast<int>(perspective));
+                    int fi = nnue::boardFeatureIndex(kingSq, capIsOwn, capType, move.to);
+                    if (fi >= 0) removed[nRemoved++] = fi;
+                }
 
                 PieceType capBase = unpromote(capType);
                 const int oldCount = hand(board, mover)[capBase];
                 int newCount = oldCount + 1;
-                added[nAdded++] = nnue::handFeatureIndex(perspective, mover, capBase, newCount);
+                int fi = nnue::handFeatureIndex(mover == perspective, capBase, newCount);
+                if (fi >= 0) added[nAdded++] = fi;
             }
         }
     }
@@ -160,32 +210,56 @@ void NNUENetwork::computeAccumulatorFull(const Board& board, nnue::Accumulator& 
     auto whiteFeatures = extractActiveFeatures(board, White);
     computeAccumulator(blackFeatures, acc.black);
     computeAccumulator(whiteFeatures, acc.white);
+    acc.blackKingSq = board.blackKingSquare;
+    acc.whiteKingSq = board.whiteKingSquare;
     acc.computed = true;
 }
 
-void NNUENetwork::updateAccumulatorIncremental(const nnue::Accumulator& parent, const nnue::FeatureDelta& delta, nnue::Accumulator& child) const {
-    std::copy(parent.black, parent.black + nnue::L0Size, child.black);
-    for (int i = 0; i < delta.numBlackRemoved; ++i) {
-        const int fi = delta.blackRemoved[i];
-        if (fi >= 0 && fi < nnue::InputDim)
-            for (int j = 0; j < nnue::L0Size; ++j) child.black[j] -= l0Weights_[fi][j];
-    }
-    for (int i = 0; i < delta.numBlackAdded; ++i) {
-        const int fi = delta.blackAdded[i];
-        if (fi >= 0 && fi < nnue::InputDim)
-            for (int j = 0; j < nnue::L0Size; ++j) child.black[j] += l0Weights_[fi][j];
+void NNUENetwork::updateAccumulatorIncremental(const Board& boardAfterMove, const nnue::Accumulator& parent, const nnue::FeatureDelta& delta, nnue::Accumulator& child) const {
+    if (delta.blackNeedsFullRecompute) {
+        auto features = extractActiveFeatures(boardAfterMove, Black);
+        computeAccumulator(features, child.black);
+        child.blackKingSq = boardAfterMove.blackKingSquare;
+    } else {
+        std::copy(parent.black, parent.black + nnue::L0Size, child.black);
+        for (int i = 0; i < delta.numBlackRemoved; ++i) {
+            const int fi = delta.blackRemoved[i];
+            if (fi >= 0 && fi < nnue::InputDim) {
+                const std::int16_t* w = &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size];
+                for (int j = 0; j < nnue::L0Size; ++j) child.black[j] -= w[j];
+            }
+        }
+        for (int i = 0; i < delta.numBlackAdded; ++i) {
+            const int fi = delta.blackAdded[i];
+            if (fi >= 0 && fi < nnue::InputDim) {
+                const std::int16_t* w = &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size];
+                for (int j = 0; j < nnue::L0Size; ++j) child.black[j] += w[j];
+            }
+        }
+        child.blackKingSq = parent.blackKingSq;
     }
 
-    std::copy(parent.white, parent.white + nnue::L0Size, child.white);
-    for (int i = 0; i < delta.numWhiteRemoved; ++i) {
-        const int fi = delta.whiteRemoved[i];
-        if (fi >= 0 && fi < nnue::InputDim)
-            for (int j = 0; j < nnue::L0Size; ++j) child.white[j] -= l0Weights_[fi][j];
-    }
-    for (int i = 0; i < delta.numWhiteAdded; ++i) {
-        const int fi = delta.whiteAdded[i];
-        if (fi >= 0 && fi < nnue::InputDim)
-            for (int j = 0; j < nnue::L0Size; ++j) child.white[j] += l0Weights_[fi][j];
+    if (delta.whiteNeedsFullRecompute) {
+        auto features = extractActiveFeatures(boardAfterMove, White);
+        computeAccumulator(features, child.white);
+        child.whiteKingSq = boardAfterMove.whiteKingSquare;
+    } else {
+        std::copy(parent.white, parent.white + nnue::L0Size, child.white);
+        for (int i = 0; i < delta.numWhiteRemoved; ++i) {
+            const int fi = delta.whiteRemoved[i];
+            if (fi >= 0 && fi < nnue::InputDim) {
+                const std::int16_t* w = &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size];
+                for (int j = 0; j < nnue::L0Size; ++j) child.white[j] -= w[j];
+            }
+        }
+        for (int i = 0; i < delta.numWhiteAdded; ++i) {
+            const int fi = delta.whiteAdded[i];
+            if (fi >= 0 && fi < nnue::InputDim) {
+                const std::int16_t* w = &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size];
+                for (int j = 0; j < nnue::L0Size; ++j) child.white[j] += w[j];
+            }
+        }
+        child.whiteKingSq = parent.whiteKingSq;
     }
 
     child.computed = true;
@@ -241,8 +315,10 @@ bool NNUENetwork::load(const std::string& path) {
     char magic[4];
     file.read(magic, 4);
 
-    if (std::strncmp(magic, "NNU2", 4) == 0) {
-        file.read(reinterpret_cast<char*>(l0Weights_), sizeof(l0Weights_));
+    if (std::strncmp(magic, "NNU3", 4) == 0) {
+        const std::size_t l0WeightSize = static_cast<std::size_t>(nnue::InputDim) * nnue::L0Size;
+        l0Weights_.resize(l0WeightSize);
+        file.read(reinterpret_cast<char*>(l0Weights_.data()), l0WeightSize * sizeof(std::int16_t));
         file.read(reinterpret_cast<char*>(l0Biases_), sizeof(l0Biases_));
         file.read(reinterpret_cast<char*>(l1Weights_), sizeof(l1Weights_));
         file.read(reinterpret_cast<char*>(l1Biases_), sizeof(l1Biases_));
@@ -262,8 +338,9 @@ bool NNUENetwork::save(const std::string& path) const {
     std::ofstream file(path, std::ios::binary);
     if (!file) return false;
 
-    file.write("NNU2", 4);
-    file.write(reinterpret_cast<const char*>(l0Weights_), sizeof(l0Weights_));
+    file.write("NNU3", 4);
+    const std::size_t l0WeightSize = static_cast<std::size_t>(nnue::InputDim) * nnue::L0Size;
+    file.write(reinterpret_cast<const char*>(l0Weights_.data()), l0WeightSize * sizeof(std::int16_t));
     file.write(reinterpret_cast<const char*>(l0Biases_), sizeof(l0Biases_));
     file.write(reinterpret_cast<const char*>(l1Weights_), sizeof(l1Weights_));
     file.write(reinterpret_cast<const char*>(l1Biases_), sizeof(l1Biases_));
