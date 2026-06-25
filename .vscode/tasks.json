@@ -2,28 +2,38 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Remote: Train Bootstrap",
+            "label": "Local: Build All",
+            "type": "shell",
+            "command": "cmake --build build --config Release",
+            "group": "build",
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "Remote [MCTS/Transformer]: Train",
+            "detail": "train.py — Transformer モデル学習 → nn_model.onnx",
             "type": "process",
             "command": "powershell",
             "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train.ps1",
-                     "--cache", "kifu_cache.npz", "--epochs", "10","--batch-size","4096",
+                     "--cache", "kifu_cache.npz", "--epochs", "10", "--batch-size", "4096",
                      "--bootstrap-rounds", "2", "--bootstrap-blend", "0.5", "--drop-margin", "0.8"],
             "group": "build",
             "problemMatcher": [],
             "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
         },
         {
-            "label": "Remote: Train (custom)",
+            "label": "Remote [MCTS/Transformer]: Train (custom)",
+            "detail": "train.py — 引数を手入力",
             "type": "process",
             "command": "powershell",
             "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train.ps1",
-                     "${input:trainArgs}"],
+                     "${input:mctsTrainArgs}"],
             "group": "build",
             "problemMatcher": [],
             "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
         },
         {
-            "label": "Remote: Init Cache (初回のみ)",
+            "label": "Remote [MCTS/Transformer]: Init Cache (初回のみ)",
+            "detail": "train.py — 棋譜キャッシュ生成",
             "type": "process",
             "command": "powershell",
             "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train.ps1",
@@ -33,19 +43,129 @@
             "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
         },
         {
-            "label": "Local: Build Classic",
-            "type": "shell",
-            "command": "cmake --build build --config Release",
+            "label": "Remote [NNUE]: Train",
+            "detail": "train_nnue.py — HalfKP+SCReLU学習 → nnue.bin",
+            "type": "process",
+            "command": "powershell",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train_nnue.ps1",
+                     "--kifu", "kifu/floodgate", "--epochs", "20", "--batch-size", "65536"],
             "group": "build",
-            "problemMatcher": "$msCompile"
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "Remote [NNUE]: Train with Bootstrap",
+            "detail": "train_nnue.py — eval bootstrapping付き学習",
+            "type": "process",
+            "command": "powershell",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train_nnue.ps1",
+                     "--kifu", "kifu/floodgate", "--epochs", "20", "--batch-size", "65536",
+                     "--bootstrap", "nnue_model.pt", "--lambda-blend", "0.5"],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "Remote [NNUE]: Train (custom)",
+            "detail": "train_nnue.py — 引数を手入力",
+            "type": "process",
+            "command": "powershell",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train_nnue.ps1",
+                     "${input:nnueTrainArgs}"],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "Remote [Alpha]: Supervised Train",
+            "detail": "train_alpha.py — ResNet-SE教師あり学習 → alpha_model.onnx",
+            "type": "process",
+            "command": "powershell",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train_alpha.ps1",
+                     "--kifu", "kifu/floodgate", "--epochs", "20", "--batch-size", "1024"],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "Remote [Alpha]: RL Train",
+            "detail": "train_alpha_rl.py — 自己対局データからRL学習",
+            "type": "process",
+            "command": "powershell",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train_alpha_rl.ps1",
+                     "${input:alphaRlTrainArgs}"],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "Remote [Alpha]: RL Loop (自己対局→学習→評価→昇格)",
+            "detail": "alpha_train_loop.py — フルRLループ",
+            "type": "process",
+            "command": "powershell",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_alpha_loop.ps1"],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "Remote [Alpha]: Train (custom)",
+            "detail": "train_alpha.py — 引数を手入力",
+            "type": "process",
+            "command": "powershell",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train_alpha.ps1",
+                     "${input:alphaTrainArgs}"],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "Remote [Classic/Linear]: Train",
+            "detail": "train_classic.py — 線形評価関数学習 → linear.weights (要リモートビルド)",
+            "type": "process",
+            "command": "powershell",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train_classic.ps1",
+                     "--kifu", "kifu/floodgate", "--engine", "build/kishi-to-classic", "--epochs", "1"],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "Remote [Classic/MLP]: Train",
+            "detail": "train_mlp.py — MLP評価関数学習 → mlp.weights (要リモートビルド)",
+            "type": "process",
+            "command": "powershell",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train_mlp.ps1",
+                     "--kifu", "kifu/floodgate", "--engine", "build/kishi-to-classic", "--epochs", "5"],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
         }
     ],
     "inputs": [
         {
-            "id": "trainArgs",
+            "id": "mctsTrainArgs",
             "type": "promptString",
-            "description": "train.py の引数 (例: --cache kifu_cache.npz --epochs 20)",
-            "default": "--cache kifu_cache.npz --epochs 10"
+            "description": "train.py (MCTS/Transformer) の引数",
+            "default": "--cache kifu_cache.npz --epochs 10 --batch-size 4096"
+        },
+        {
+            "id": "nnueTrainArgs",
+            "type": "promptString",
+            "description": "train_nnue.py の引数",
+            "default": "--kifu kifu/floodgate --epochs 20 --batch-size 65536"
+        },
+        {
+            "id": "alphaTrainArgs",
+            "type": "promptString",
+            "description": "train_alpha.py の引数",
+            "default": "--kifu kifu/floodgate --epochs 20 --batch-size 1024"
+        },
+        {
+            "id": "alphaRlTrainArgs",
+            "type": "promptString",
+            "description": "train_alpha_rl.py の引数 (--data は必須)",
+            "default": "--data alpha_rl_work/data/*.npz --epochs 5 --batch-size 1024"
         }
     ]
 }
