@@ -141,6 +141,100 @@ Bitboard attackersOf(const Board& board, int square, Color byColor) {
     return attackers;
 }
 
+namespace {
+
+Bitboard allAttackersOfOcc(const Board& board, int square, const Bitboard& occ) {
+    initAttackTables();
+    Bitboard attackers;
+    for (int ci = 0; ci < 2; ++ci) {
+        Color c = ci == 0 ? Black : White;
+        Color rev = opposite(c);
+        Bitboard cp = board.occupied[ci];
+        attackers |= stepAttacks(Pawn, square, rev) & board.pieceBB[Pawn] & cp;
+        attackers |= stepAttacks(Knight, square, rev) & board.pieceBB[Knight] & cp;
+        attackers |= stepAttacks(Silver, square, rev) & board.pieceBB[Silver] & cp;
+        Bitboard goldLike = board.pieceBB[Gold] | board.pieceBB[ProPawn] | board.pieceBB[ProLance]
+                          | board.pieceBB[ProKnight] | board.pieceBB[ProSilver];
+        attackers |= stepAttacks(Gold, square, rev) & goldLike & cp;
+        attackers |= stepAttacks(King, square, rev) & board.pieceBB[King] & cp;
+        attackers |= stepAttacks(Horse, square, rev) & board.pieceBB[Horse] & cp;
+        attackers |= stepAttacks(Dragon, square, rev) & board.pieceBB[Dragon] & cp;
+    }
+    attackers |= slideAttack(square, 0, 1, occ) & board.pieceBB[Lance] & board.occupied[0];
+    attackers |= slideAttack(square, 0, -1, occ) & board.pieceBB[Lance] & board.occupied[1];
+    Bitboard bishopLike = board.pieceBB[Bishop] | board.pieceBB[Horse];
+    for (int df = -1; df <= 1; df += 2)
+        for (int dr = -1; dr <= 1; dr += 2)
+            attackers |= slideAttack(square, df, dr, occ) & bishopLike;
+    Bitboard rookLike = board.pieceBB[Rook] | board.pieceBB[Dragon];
+    for (auto [df, dr] : std::array<std::pair<int,int>,4>{{{0,-1},{0,1},{-1,0},{1,0}}})
+        attackers |= slideAttack(square, df, dr, occ) & rookLike;
+    return attackers & occ;
+}
+
+int seeValue(PieceType type) {
+    static constexpr int V[] = {0,100,300,320,520,620,850,1050,10000,560,560,560,560,1150,1350};
+    return (type >= 1 && type <= 14) ? V[type] : 0;
+}
+
+} // anonymous namespace
+
+int staticExchangeEval(const Board& board, const Move& move) {
+    if (move.isDrop()) return 0;
+    PieceType victim = typeOf(board.squares[move.to]);
+    if (victim == 0 && !move.promote) return 0;
+
+    int gain[32];
+    int d = 0;
+    gain[0] = victim != 0 ? seeValue(victim) : 0;
+    PieceType attacker = typeOf(board.squares[move.from]);
+    if (move.promote) {
+        PieceType prom = promote(attacker);
+        gain[0] += seeValue(prom) - seeValue(attacker);
+        attacker = prom;
+    }
+
+    Bitboard occ = board.occupied[0] | board.occupied[1];
+    occ.clear(move.from);
+    Bitboard attackers = allAttackersOfOcc(board, move.to, occ);
+    Color side = opposite(board.side);
+
+    static const PieceType ptOrder[] = {
+        Pawn, Lance, Knight, Silver, ProPawn, ProLance, ProKnight, ProSilver,
+        Gold, Bishop, Rook, Horse, Dragon, King
+    };
+
+    while (d < 30) {
+        d++;
+        gain[d] = seeValue(attacker) - gain[d - 1];
+        if (std::max(-gain[d - 1], gain[d]) < 0) break;
+
+        int ci = side == Black ? 0 : 1;
+        Bitboard sideAtt = attackers & board.occupied[ci];
+        if (sideAtt.empty()) break;
+
+        PieceType nextPt = King;
+        int nextSq = -1;
+        for (PieceType pt : ptOrder) {
+            Bitboard cands = sideAtt & board.pieceBB[pt];
+            if (!cands.empty()) { nextPt = pt; nextSq = cands.lsb(); break; }
+        }
+
+        if (nextPt == King) {
+            Bitboard opAtt = attackers & board.occupied[1 - ci];
+            if (!opAtt.empty()) break;
+        }
+
+        occ.clear(nextSq);
+        attackers = allAttackersOfOcc(board, move.to, occ);
+        attacker = nextPt;
+        side = opposite(side);
+    }
+
+    while (--d) gain[d - 1] = -std::max(-gain[d - 1], gain[d]);
+    return gain[0];
+}
+
 Bitboard FileMask[10];
 
 namespace {

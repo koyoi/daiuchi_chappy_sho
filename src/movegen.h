@@ -14,6 +14,7 @@ bool isSquareAttacked(const Board& board, int square, Color byColor);
 int countAttackers(const Board& board, int square, Color byColor);
 int findKing(const Board& board, Color color);
 bool givesCheck(const Board& board, const Move& move);
+int staticExchangeEval(const Board& board, const Move& move);
 
 extern Bitboard FileMask[10];
 

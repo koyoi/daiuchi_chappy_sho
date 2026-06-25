@@ -494,6 +494,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bo
         const bool isCheck = givesCheck(board, move);
         if (canFutilityPrune && isQuiet && !isCheck && staticEval + futilityMargin <= alpha) { ++moveIndex; continue; }
         if (depth <= 3 && moveIndex >= lmpThreshold && isQuiet && !isCheck && !inCheck && anySearched) { ++moveIndex; continue; }
+        if (!isQuiet && !isCheck && !inCheck && anySearched && depth <= 4 && staticExchangeEval(board, move) < -100 * depth) { ++moveIndex; continue; }
 
         auto delta = nnue_.computeMoveDelta(board, move);
         UndoInfo undo;
@@ -637,6 +638,7 @@ int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta
             if (!capture && !promotion) {
                 if (depth < qCheckDepthMin_ || !givesCheck(board, move)) continue;
             }
+            if (capture && staticExchangeEval(board, move) < 0) continue;
         }
         auto delta = nnue_.computeMoveDelta(board, move);
         UndoInfo undo;
