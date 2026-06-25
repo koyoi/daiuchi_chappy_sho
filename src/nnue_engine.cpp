@@ -95,7 +95,7 @@ thread_local std::array<nnue::Accumulator, AccStackSize> accStack;
 } // namespace
 
 NNUEEngine::NNUEEngine()
-    : transposition_(TTSize),
+    : transposition_(static_cast<std::size_t>(ttSize_) * BucketSize),
       contHistory_(static_cast<std::size_t>(ContHistDim) * ContHistDim, 0),
       rng_(static_cast<unsigned int>(std::chrono::steady_clock::now().time_since_epoch().count())) {
     zobrist::init();
@@ -399,24 +399,28 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bo
 
     const int alphaOriginal = alpha;
     const std::uint64_t key = boardHash(board);
-    const int ttIndex = static_cast<int>(key & TTMask);
-    const int lockIndex = static_cast<int>((key >> TTBits) % LockCount);
+    const int ttIndex = static_cast<int>(key & ttMask_);
+    const int lockIndex = static_cast<int>((key >> ttBits_) % LockCount);
     Move ttMove{};
     int ttScore = 0, ttDepth = -1;
     std::uint8_t ttFlag = 0;
     {
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
-        const TranspositionEntry& slot = transposition_[ttIndex];
-        if (slot.key == key && isRecentGeneration(slot.generation)) {
-            ttMove = slot.bestMove;
-            ttScore = slot.score;
-            ttDepth = slot.depth;
-            ttFlag = slot.flag;
-            if (slot.depth >= depth && excludedMove.to < 0) {
-                if (slot.flag == ExactScore) return slot.score;
-                if (slot.flag == LowerBound) alpha = std::max(alpha, slot.score);
-                else if (slot.flag == UpperBound) beta = std::min(beta, slot.score);
-                if (alpha >= beta) return slot.score;
+        const int bucketBase = ttIndex * BucketSize;
+        for (int b = 0; b < BucketSize; ++b) {
+            const TranspositionEntry& slot = transposition_[bucketBase + b];
+            if (slot.key == key && isRecentGeneration(slot.generation)) {
+                ttMove = slot.bestMove;
+                ttScore = slot.score;
+                ttDepth = slot.depth;
+                ttFlag = slot.flag;
+                if (slot.depth >= depth && excludedMove.to < 0) {
+                    if (slot.flag == ExactScore) return slot.score;
+                    if (slot.flag == LowerBound) alpha = std::max(alpha, slot.score);
+                    else if (slot.flag == UpperBound) beta = std::min(beta, slot.score);
+                    if (alpha >= beta) return slot.score;
+                }
+                break;
             }
         }
     }
@@ -461,8 +465,11 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bo
     if (ttMove.to < 0 && depth >= iidMinDepth_ && !inCheck) {
         search(board, depth - 3, ply, alpha, beta, false, prevMove);
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
-        const TranspositionEntry& slot = transposition_[ttIndex];
-        if (slot.key == key && isRecentGeneration(slot.generation)) ttMove = slot.bestMove;
+        const int iidBase = ttIndex * BucketSize;
+        for (int b = 0; b < BucketSize; ++b) {
+            const TranspositionEntry& slot = transposition_[iidBase + b];
+            if (slot.key == key && isRecentGeneration(slot.generation)) { ttMove = slot.bestMove; break; }
+        }
     }
 
     // Singular extension
@@ -598,9 +605,20 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bo
 
     if (excludedMove.to < 0) {
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
-        TranspositionEntry& slot = transposition_[ttIndex];
-        if (slot.generation != ttGeneration_ || depth >= slot.depth) {
+        const int storeBase = ttIndex * BucketSize;
+        int replaceIdx = 0;
+        int worstQuality = std::numeric_limits<int>::max();
+        for (int b = 0; b < BucketSize; ++b) {
+            const TranspositionEntry& s = transposition_[storeBase + b];
+            if (s.key == key) { replaceIdx = b; worstQuality = -1; break; }
+            if (s.depth < 0) { replaceIdx = b; worstQuality = -1; break; }
+            int q = s.depth * 8 + (isRecentGeneration(s.generation) ? 256 : 0);
+            if (q < worstQuality) { worstQuality = q; replaceIdx = b; }
+        }
+        TranspositionEntry& slot = transposition_[storeBase + replaceIdx];
+        if (slot.key != key || slot.generation != ttGeneration_ || depth >= slot.depth) {
             slot.key = key; slot.depth = depth; slot.score = best; slot.bestMove = bestMoveLocal;
+            slot.staticEval = staticEval;
             slot.flag = best <= alphaOriginal ? UpperBound : (best >= beta ? LowerBound : ExactScore);
             slot.generation = ttGeneration_;
         }
@@ -655,13 +673,16 @@ int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta
 
 void NNUEEngine::orderMoves(const Board& board, MoveList& moves, int ply, const Move& prevMove) const {
     const std::uint64_t key = boardHash(board);
-    const int ttIndex = static_cast<int>(key & TTMask);
-    const int lockIndex = static_cast<int>((key >> TTBits) % LockCount);
+    const int ttIndex = static_cast<int>(key & ttMask_);
+    const int lockIndex = static_cast<int>((key >> ttBits_) % LockCount);
     Move ttMove{};
     {
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
-        const TranspositionEntry& slot = transposition_[ttIndex];
-        if (slot.key == key && isRecentGeneration(slot.generation)) ttMove = slot.bestMove;
+        const int bucketBase = ttIndex * BucketSize;
+        for (int b = 0; b < BucketSize; ++b) {
+            const TranspositionEntry& slot = transposition_[bucketBase + b];
+            if (slot.key == key && isRecentGeneration(slot.generation)) { ttMove = slot.bestMove; break; }
+        }
     }
     struct ScoredMove { Move move; int score; };
     const int n = moves.size();
@@ -785,14 +806,20 @@ std::vector<Move> NNUEEngine::extractPV(Board board, int maxDepth) const {
     std::vector<Move> pv;
     for (int i = 0; i < maxDepth; ++i) {
         const std::uint64_t key = boardHash(board);
-        const int ttIndex = static_cast<int>(key & TTMask);
-        const int lockIndex = static_cast<int>((key >> TTBits) % LockCount);
+        const int ttIndex = static_cast<int>(key & ttMask_);
+        const int lockIndex = static_cast<int>((key >> ttBits_) % LockCount);
         Move ttMove;
         {
             std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
-            const TranspositionEntry& slot = transposition_[ttIndex];
-            if (slot.key != key || !isRecentGeneration(slot.generation)) break;
-            ttMove = slot.bestMove;
+            const int bucketBase = ttIndex * BucketSize;
+            bool found = false;
+            for (int b = 0; b < BucketSize; ++b) {
+                const TranspositionEntry& slot = transposition_[bucketBase + b];
+                if (slot.key == key && isRecentGeneration(slot.generation)) {
+                    ttMove = slot.bestMove; found = true; break;
+                }
+            }
+            if (!found) break;
         }
         if (ttMove.to < 0) break;
         pv.push_back(ttMove);
@@ -807,6 +834,19 @@ int NNUEEngine::depthLimit() const {
 
 MateResult NNUEEngine::searchMate(const Board& board, int timeLimitMs) {
     return mateSolver_.searchMate(board, board.side, 31, timeLimitMs);
+}
+
+void NNUEEngine::setHashSizeMB(int mb) {
+    mb = std::clamp(mb, 1, 65536);
+    std::size_t bytes = static_cast<std::size_t>(mb) * 1024 * 1024;
+    std::size_t entrySize = sizeof(TranspositionEntry);
+    std::size_t numBuckets = bytes / (entrySize * BucketSize);
+    int bits = 1;
+    while ((1ULL << (bits + 1)) <= numBuckets) ++bits;
+    ttBits_ = bits;
+    ttSize_ = 1 << ttBits_;
+    ttMask_ = ttSize_ - 1;
+    transposition_.assign(static_cast<std::size_t>(ttSize_) * BucketSize, TranspositionEntry{});
 }
 
 void NNUEEngine::setSearchDepth(int depth) { searchDepth_ = std::clamp(depth, 0, 128); }

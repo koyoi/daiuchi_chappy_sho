@@ -82,6 +82,8 @@ void handleSetOption(NNUEEngine& engine, const std::vector<std::string>& words) 
         }
     } else if (name == "ReuseCache") {
         engine.setReuseCache(value != "false" && value != "0");
+    } else if (name == "Hash") {
+        try { engine.setHashSizeMB(std::stoi(value)); } catch (...) {}
     } else {
         try { engine.setParam(name, std::stoi(value)); } catch (...) {}
     }
@@ -108,8 +110,8 @@ void nnueUsiLoop() {
             std::cout << "option name NNUEFile type string default nnue.bin" << std::endl;
             std::cout << "option name Book type check default true" << std::endl;
             std::cout << "option name WarnOnNoWeights type check default true" << std::endl;
-            std::cout << "option name LMRFullDepthMoves type spin default 4 min 1 max 20" << std::endl;
-            std::cout << "option name LMRMinDepth type spin default 3 min 1 max 10" << std::endl;
+            std::cout << "option name Hash type spin default 256 min 1 max 65536" << std::endl;
+            std::cout << "option name SEMinDepth type spin default 8 min 4 max 20" << std::endl;
             std::cout << "option name NMPMinDepth type spin default 3 min 1 max 10" << std::endl;
             std::cout << "option name NMPReduction type spin default 3 min 1 max 8" << std::endl;
             std::cout << "option name FutilityMargin1 type spin default 400 min 50 max 2000" << std::endl;

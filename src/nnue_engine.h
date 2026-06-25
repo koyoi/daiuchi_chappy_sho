@@ -32,6 +32,7 @@ public:
     void setBookEnabled(bool enabled);
     void setWarnOnNoWeights(bool enabled) { warnOnNoWeights_ = enabled; }
     void setReuseCache(bool enabled) { reuseCache_ = enabled; }
+    void setHashSizeMB(int mb);
     bool loadBook(const std::string& path = "book.txt");
     bool loadNNUE(const std::string& path);
     const std::string& nnuePath() const { return nnuePath_; }
@@ -64,15 +65,17 @@ private:
         std::uint64_t key = 0;
         int depth = -1;
         int score = 0;
+        int staticEval = 0;
         std::uint8_t flag = 0;
         std::uint8_t generation = 0;
         Move bestMove{};
     };
 
-    static constexpr int TTBits = 20;
-    static constexpr int TTSize = 1 << TTBits;
-    static constexpr int TTMask = TTSize - 1;
+    static constexpr int BucketSize = 4;
     static constexpr int LockCount = 64;
+    int ttBits_ = 20;
+    int ttSize_ = 1 << 20;
+    int ttMask_ = (1 << 20) - 1;
     static constexpr int MaxPly = 128;
     static constexpr int KillerSlots = 2;
     static constexpr int MaxLMRDepth = 64;
