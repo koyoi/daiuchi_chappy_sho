@@ -396,7 +396,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
     {
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         const TranspositionEntry& slot = transposition_[ttIndex];
-        if (slot.key == key && slot.generation == ttGeneration_) {
+        if (slot.key == key && isRecentGeneration(slot.generation)) {
             ttMove = slot.bestMove;
             if (slot.depth >= depth) {
                 if (slot.flag == ExactScore) return slot.score;
@@ -451,7 +451,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
         search(board, depth - 3, ply, alpha, beta, rootSide, false, prevMove);
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         const TranspositionEntry& slot = transposition_[ttIndex];
-        if (slot.key == key && slot.generation == ttGeneration_) ttMove = slot.bestMove;
+        if (slot.key == key && isRecentGeneration(slot.generation)) ttMove = slot.bestMove;
     }
 
     orderMoves(board, legal, rootSide, ply, prevMove);
@@ -679,7 +679,7 @@ void NNUEEngine::orderMoves(const Board& board, MoveList& moves, Color rootSide,
     {
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         const TranspositionEntry& slot = transposition_[ttIndex];
-        if (slot.key == key && slot.generation == ttGeneration_) ttMove = slot.bestMove;
+        if (slot.key == key && isRecentGeneration(slot.generation)) ttMove = slot.bestMove;
     }
     struct ScoredMove { Move move; int score; };
     const int n = moves.size();
@@ -791,7 +791,7 @@ std::vector<Move> NNUEEngine::extractPV(Board board, Color rootSide, int maxDept
         {
             std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
             const TranspositionEntry& slot = transposition_[ttIndex];
-            if (slot.key != key || slot.generation != ttGeneration_) break;
+            if (slot.key != key || !isRecentGeneration(slot.generation)) break;
             ttMove = slot.bestMove;
         }
         if (ttMove.to < 0) break;

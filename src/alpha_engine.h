@@ -32,6 +32,7 @@ public:
     void setFPUReduction(double v);
     void setTemperatureDropMove(int m);
     void setBookEnabled(bool enabled) { bookEnabled_ = enabled; }
+    void setReuseTree(bool enabled) { mcts_.setReuseTree(enabled); }
     bool loadBook(const std::string& path = "book.txt");
     bool ensureNN();
     bool nnReady() const { return nn_.isLoaded(); }

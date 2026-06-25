@@ -129,7 +129,7 @@ void MCTSEngineWrapper::recordMove(const Board&, const Move&, bool) {}
 
 void MCTSEngineWrapper::finishGame(int, Color) {}
 
-void MCTSEngineWrapper::clearGame() {}
+void MCTSEngineWrapper::clearGame() { mcts_.clearTree(); }
 
 void MCTSEngineWrapper::setMaxMoveTimeMs(int ms) {
     maxMoveTimeMs_ = std::max(50, ms);

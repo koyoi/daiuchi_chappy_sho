@@ -34,6 +34,7 @@ public:
     void setBatchSize(int n);
     void setBookEnabled(bool enabled) { bookEnabled_ = enabled; }
     void setWarnOnNoModel(bool enabled) { warnOnNoModel_ = enabled; }
+    void setReuseTree(bool enabled) { mcts_.setReuseTree(enabled); }
     bool loadBook(const std::string& path = "book.txt");
     bool ensureNN();
     bool nnReady() const { return nn_.isReady(); }

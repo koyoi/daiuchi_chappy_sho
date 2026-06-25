@@ -79,6 +79,8 @@ void handleSetOption(NNUEEngine& engine, const std::vector<std::string>& words) 
             else
                 std::cout << "info string ERROR: " << value << " format error (bad magic or truncated)" << std::endl;
         }
+    } else if (name == "ReuseCache") {
+        engine.setReuseCache(value != "false" && value != "0");
     } else {
         try { engine.setParam(name, std::stoi(value)); } catch (...) {}
     }
@@ -117,6 +119,7 @@ void nnueUsiLoop() {
             std::cout << "option name QDepth type spin default 6 min 1 max 20" << std::endl;
             std::cout << "option name QCheckDepthMin type spin default 4 min 1 max 10" << std::endl;
             std::cout << "option name RootPruneWidth type spin default 15 min 1 max 100" << std::endl;
+            std::cout << "option name ReuseCache type check default true" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
             if (!engine.loadNNUE("nnue.bin")) {

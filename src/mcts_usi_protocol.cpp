@@ -71,6 +71,8 @@ void handleSetOption(MCTSEngineWrapper& engine, const std::vector<std::string>& 
         engine.setNNDevice(value);
     } else if (name == "MctsBatchSize") {
         try { engine.setBatchSize(std::stoi(value)); } catch (...) {}
+    } else if (name == "ReuseTree") {
+        engine.setReuseTree(value != "false" && value != "0");
     }
 }
 
@@ -147,6 +149,7 @@ void mctsUsiLoop() {
             std::cout << "option name Book type check default true" << std::endl;
             std::cout << "option name WarnOnNoModel type check default true" << std::endl;
             std::cout << "option name MctsBatchSize type spin default 8 min 1 max 64" << std::endl;
+            std::cout << "option name ReuseTree type check default true" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
             if (!engine.ensureNN()) {

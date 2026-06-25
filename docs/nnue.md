@@ -131,7 +131,7 @@ NNUE エンジンの探索部は Classic エンジンとほぼ同一の構成。
 | テクニック | 説明 |
 |-----------|------|
 | 反復深化 | depth 1 から順に深化、時間制限で打ち切り |
-| 置換表 | 2^20 エントリ、64 ストライプ mutex、世代管理 |
+| 置換表 | 2^20 エントリ、64 ストライプ mutex、世代管理。`ReuseCache` で前回の探索結果を再利用 |
 | Aspiration Windows | 前回スコア ±50 の狭窓で開始 |
 | PVS | 最善候補のみ全窓、以降は null window |
 | Null Move Pruning | depth >= 3 で R=3 の null move |

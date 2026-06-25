@@ -51,6 +51,8 @@ void handleSetOption(AlphaEngineWrapper& engine, const std::vector<std::string>&
         try { engine.setTemperatureDropMove(std::stoi(value)); } catch (...) {}
     } else if (name == "Book") {
         engine.setBookEnabled(value != "false" && value != "0");
+    } else if (name == "ReuseTree") {
+        engine.setReuseTree(value != "false" && value != "0");
     }
 }
 
@@ -137,6 +139,7 @@ void alphaUsiLoop() {
             std::cout << "option name FPUReduction type spin default 20 min 0 max 100" << std::endl;
             std::cout << "option name TemperatureDropMove type spin default 30 min 0 max 200" << std::endl;
             std::cout << "option name Book type check default true" << std::endl;
+            std::cout << "option name ReuseTree type check default true" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
             if (!engine.ensureNN()) {

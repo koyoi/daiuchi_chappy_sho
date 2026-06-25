@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <iostream>
 #include <numeric>
 
 namespace shogi {
@@ -152,15 +153,46 @@ MCTSResult MCTSEngine::search(const Board& board, const MCTSConfig& config,
     auto startTime = std::chrono::steady_clock::now();
     auto deadline = startTime + std::chrono::milliseconds(timeLimitMs > 0 ? timeLimitMs : 100000);
 
-    auto root = std::make_unique<MCTSNode>();
+    std::unique_ptr<MCTSNode> root;
+    int reuseVisits = 0;
 
-    // Root expansion: single eval
-    if (!expandMoves(root.get(), board)) {
-        return MCTSResult{};
+    if (reuseTree_ && retainedTree_ && retainedTree_->expanded) {
+        for (auto& child : retainedTree_->children) {
+            if (!child->expanded) continue;
+            for (auto& grandchild : child->children) {
+                Board tmp = retainedBoard_;
+                applyMove(tmp, child->move);
+                applyMove(tmp, grandchild->move);
+                if (tmp.hash == board.hash) {
+                    reuseVisits = grandchild->visitCount.load(std::memory_order_relaxed);
+                    root = std::move(grandchild);
+                    root->parent = nullptr;
+                    goto reuse_done;
+                }
+            }
+        }
     }
-    {
-        NNOutput rootOut = nn_.evaluate(board);
-        applyNNOutput(root.get(), rootOut, board);
+reuse_done:
+    retainedTree_.reset();
+
+    if (!root) {
+        root = std::make_unique<MCTSNode>();
+        if (!expandMoves(root.get(), board)) {
+            return MCTSResult{};
+        }
+        {
+            NNOutput rootOut = nn_.evaluate(board);
+            applyNNOutput(root.get(), rootOut, board);
+        }
+    } else {
+        std::cout << "info string reusing tree (" << reuseVisits << " sims)" << std::endl;
+        if (!root->expanded) {
+            if (!expandMoves(root.get(), board)) {
+                return MCTSResult{};
+            }
+            NNOutput rootOut = nn_.evaluate(board);
+            applyNNOutput(root.get(), rootOut, board);
+        }
     }
 
     if (config_.addNoise) {
@@ -305,6 +337,12 @@ MCTSResult MCTSEngine::search(const Board& board, const MCTSConfig& config,
     }
     result.simulations = simCount;
     result.timeMs = elapsedMs;
+
+    if (reuseTree_) {
+        retainedBoard_ = board;
+        retainedTree_ = std::move(root);
+    }
+
     return result;
 }
 

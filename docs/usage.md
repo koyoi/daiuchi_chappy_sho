@@ -91,6 +91,7 @@ setoption name WeightsFile value linear.weights
 setoption name TrainingDataFile value mlp_training.tsv
 setoption name MlpWeightsFile value mlp.weights
 setoption name RootPruneWidth value 0..256
+setoption name ReuseCache value true|false
 ```
 
 **主要オプションの説明:**
@@ -104,6 +105,7 @@ setoption name RootPruneWidth value 0..256
 - `OpeningSafety` — 序盤の罠回避ヒューリスティック。候補手の後に相手が即王手・大駒取り・危険な打ち込みをできる場合に減点。
 - `Learning` — `true` で対局終了時に `linear.weights` を更新。
 - `gameover win/lose` を受けると、勝った側の手を模倣・負けた側の手を抑制する方向に重みを更新。
+- `ReuseCache` — `true` で前回の探索の置換表エントリを次の探索でも参照可能に（デフォルト `true`）。相手が予測手を指した場合に探索効率が向上。
 
 ### MCTS エンジンのオプション
 
@@ -114,11 +116,13 @@ setoption name NNPython value python
 setoption name NNScript value tools/nn_eval.py
 setoption name NNModel value nn_model.pt
 setoption name NNDevice value auto|cuda|cpu
+setoption name ReuseTree value true|false
 ```
 
 - `MctsSimulations` — 1 手あたりの MCTS シミュレーション回数（デフォルト 800）。
 - `NNModel` — Transformer モデルファイルのパス。
 - `NNDevice` — `auto` で CUDA があれば GPU、なければ CPU。
+- `ReuseTree` — `true` で前回の MCTS ツリーを保持し、次の探索で再利用（デフォルト `true`）。相手の指した手に対応するサブツリーを新しいルートとして活用し、シミュレーション結果を引き継ぐ。
 
 ### Alpha エンジンのオプション
 
@@ -131,6 +135,7 @@ setoption name MctsBatchSize value 1..64
 setoption name FPUReduction value 0..100
 setoption name TemperatureDropMove value 0..200
 setoption name Book value true|false
+setoption name ReuseTree value true|false
 ```
 
 - `MctsSimulations` — 1 手あたりの MCTS シミュレーション回数（デフォルト 1600）。
@@ -140,6 +145,7 @@ setoption name Book value true|false
 - `FPUReduction` — First Play Urgency 減算値 ×100（デフォルト 20 = 0.20）。未訪問ノードの Q を `parentQ - FPU` に設定。
 - `TemperatureDropMove` — この手数以降は温度を 0 に下げて argmax 選択に切り替え（デフォルト 30）。0 で常時 argmax。
 - `Book` — 定跡使用の有無（デフォルト `true`）。
+- `ReuseTree` — MCTS ツリー再利用（デフォルト `true`）。前回の探索ツリーから相手の指した手に対応するサブツリーを引き継ぎ、探索効率を向上。
 
 Alpha エンジン固有のコマンド:
 

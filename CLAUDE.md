@@ -72,7 +72,7 @@ Entry point (`main.cpp`) selects protocol → `usiLoop()` or `csaLoop()` → `Le
 ### Alpha Engine (ResNet-SE + Improved MCTS)
 
 - **alpha_onnx_inference** — `AlphaOnnxInference` handles ONNX Runtime inference for the 15-block, 192-channel ResNet-SE model. Input: 45-channel 9×9 spatial features (28 piece planes + 14 hand planes + 2 attack count planes + 1 side plane). Output: WDL (win/draw/loss) 3-class value head and 2187-logit policy head (81 squares × 27 channels). `encodeBoardSpatial()` builds the spatial tensor from Board. Supports both CUDA and CPU execution providers; CPU mode uses `SetIntraOpNumThreads(hardware_concurrency())`.
-- **alpha_mcts** — `AlphaMCTSEngine` implements improved MCTS with: dynamic c_puct = `log((1+N+19652)/19652) + 2.5`, FPU (First Play Urgency) reduction where unvisited nodes get Q = parentQ - 0.2, temperature schedule (stochastic for first 30 moves, argmax after), early termination when best move has >90% of visits after 25% of simulations, and batch NN inference. `AlphaMCTSResult` includes `visitDistribution` for training data export.
+- **alpha_mcts** — `AlphaMCTSEngine` implements improved MCTS with: dynamic c_puct = `log((1+N+19652)/19652) + 2.5`, FPU (First Play Urgency) reduction where unvisited nodes get Q = parentQ - 0.2, temperature schedule (stochastic for first 30 moves, argmax after), early termination when best move has >90% of visits after 25% of simulations, batch NN inference, and tree reuse (`ReuseTree` option). Tree reuse retains the MCTS tree between moves; on the next search, the engine finds the subtree matching the opponent's move (via Zobrist hash comparison) and promotes it to root, preserving visit counts and values. `AlphaMCTSResult` includes `visitDistribution` for training data export.
 - **alpha_engine** — `AlphaEngineWrapper` composes `AlphaOnnxInference`, `AlphaMCTSEngine`, `MateSolver`, and `OpeningBook`. `chooseMove()` flow: opening book → mate search (10% of time budget, max 200ms) → tsumero detection (1.5x simulation extension) → MCTS search. Stores `lastMCTSResult_` for self-play training data access via `getvisits` USI command.
 - **Training pipeline** — Two-phase: (1) Supervised learning from Floodgate R3000+ games via `train_alpha.py`, (2) Self-play RL via `alpha_train_loop.py` (200 games/iter at 400 sims → train on 2M-position replay buffer → evaluate 20 games → gate at 55% win rate). CPU deployment via INT8 quantization (`quantize_alpha.py`) or knowledge distillation to 10-block/128ch student (`train_alpha_small.py`).
 
@@ -86,7 +86,7 @@ Board.hash is maintained incrementally in `applyMove()` via XOR. Tables: `zobris
 
 ### Transposition Table
 
-Fixed-size array of 2^20 entries, indexed by `hash & mask`. 64 stripe mutexes selected by `(hash >> 20) % 64`. Generation counter (`ttGeneration_`) avoids clearing the table between searches — stale entries are overwritten by deeper or newer results.
+Fixed-size array of 2^20 entries, indexed by `hash & mask`. 64 stripe mutexes selected by `(hash >> 20) % 64`. Generation counter (`ttGeneration_`) avoids clearing the table between searches — stale entries are overwritten by deeper or newer results. When `ReuseCache` is enabled (default), lookups accept entries from the current or previous generation, allowing reuse of prior search results across moves.
 
 ## Key Files
 
@@ -115,7 +115,7 @@ Fixed-size array of 2^20 entries, indexed by `hash & mask`. 64 stripe mutexes se
 | `tools/csa_parser.py` | CSA game record parser for training data |
 | `tools/gen_book.py` | Opening book generator via deep USI search |
 | `src/alpha_onnx_inference.h/cpp` | ResNet-SE ONNX inference (45ch spatial input, WDL+policy output) |
-| `src/alpha_mcts.h/cpp` | Improved MCTS (dynamic c_puct, FPU reduction, temperature schedule) |
+| `src/alpha_mcts.h/cpp` | Improved MCTS (dynamic c_puct, FPU reduction, temperature schedule, tree reuse) |
 | `src/alpha_engine.h/cpp` | Alpha engine wrapper (ONNX + MCTS + MateSolver + OpeningBook) |
 | `src/alpha_usi_protocol.h/cpp` | USI protocol loop for Alpha engine (getvisits command) |
 | `src/alpha_main.cpp` | Alpha engine entry point |
@@ -130,7 +130,7 @@ Fixed-size array of 2^20 entries, indexed by `hash & mask`. 64 stripe mutexes se
 
 ## Not Implemented
 
-Perpetual check detection, kachi (entering king) declaration, df-pn mate search (current solver uses iterative deepening), TCP CSA server connection.
+Perpetual check detection, kachi (entering king) declaration, df-pn mate search (current solver uses iterative deepening), TCP CSA server connection, pondering (`go ponder` / `ponderhit`).
 
 ## Testing
 

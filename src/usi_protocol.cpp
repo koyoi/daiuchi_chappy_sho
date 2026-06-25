@@ -156,6 +156,8 @@ void handleSetOption(LearningEngine& engine, const std::vector<std::string>& wor
             engine.setRootPruneWidth(std::stoi(value));
         } catch (...) {
         }
+    } else if (name == "ReuseCache") {
+        engine.setReuseCache(value != "false" && value != "0");
     }
 }
 
@@ -264,6 +266,7 @@ void usiLoop() {
             std::cout << "option name UseMLP type check default true" << std::endl;
             std::cout << "option name Book type check default true" << std::endl;
             std::cout << "option name WarnOnNoWeights type check default true" << std::endl;
+            std::cout << "option name ReuseCache type check default true" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
             if (!engine.loadWeights()) {

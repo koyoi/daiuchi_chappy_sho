@@ -64,6 +64,8 @@ public:
 
     void setSimulations(int n) { config_.simulations = n; }
     void setBatchSize(int n) { config_.batchSize = std::max(1, n); }
+    void setReuseTree(bool v) { reuseTree_ = v; }
+    void clearTree() { retainedTree_.reset(); }
 
 private:
     MCTSNode* select(MCTSNode* node) const;
@@ -78,6 +80,9 @@ private:
     NNBridge& nn_;
     MCTSConfig config_;
     std::mt19937 rng_{std::random_device{}()};
+    bool reuseTree_ = true;
+    std::unique_ptr<MCTSNode> retainedTree_;
+    Board retainedBoard_{};
 };
 
 } // namespace shogi

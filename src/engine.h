@@ -48,6 +48,7 @@ public:
     void setRootPruneWidth(int width);
     void setBookEnabled(bool enabled);
     void setWarnOnNoWeights(bool enabled) { warnOnNoWeights_ = enabled; }
+    void setReuseCache(bool enabled) { reuseCache_ = enabled; }
     bool loadBook(const std::string& path = "book.txt");
     SearchInfo lastSearchInfo() const;
     MateResult searchMate(const Board& board, int timeLimitMs = 500);
@@ -119,6 +120,10 @@ private:
     mutable std::vector<TranspositionEntry> transposition_;
     mutable std::array<std::mutex, LockCount> transpositionMutex_;
     mutable std::uint8_t ttGeneration_{0};
+    bool reuseCache_ = true;
+    bool isRecentGeneration(std::uint8_t gen) const {
+        return gen == ttGeneration_ || (reuseCache_ && gen == static_cast<std::uint8_t>(ttGeneration_ - 1));
+    }
     mutable std::chrono::steady_clock::time_point deadline_{};
     mutable std::atomic_bool stopped_{false};
     mutable std::atomic_uint64_t nodes_{0};

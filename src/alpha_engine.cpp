@@ -131,7 +131,7 @@ Move AlphaEngineWrapper::chooseMove(const Board& board, const SearchLimits& limi
     return result.bestMove;
 }
 
-void AlphaEngineWrapper::clearGame() {}
+void AlphaEngineWrapper::clearGame() { mcts_.clearTree(); }
 
 void AlphaEngineWrapper::setMaxMoveTimeMs(int ms) {
     maxMoveTimeMs_ = std::max(50, ms);

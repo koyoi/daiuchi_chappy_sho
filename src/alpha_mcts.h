@@ -71,6 +71,8 @@ public:
     void setBatchSize(int n) { config_.batchSize = std::max(1, n); }
     void setFPUReduction(double v) { config_.fpuReduction = v; }
     void setTemperatureDropMove(int m) { config_.temperatureDropMove = m; }
+    void setReuseTree(bool v) { reuseTree_ = v; }
+    void clearTree() { retainedTree_.reset(); }
 
 private:
     double dynamicCPuct(int parentVisits) const;
@@ -86,6 +88,9 @@ private:
     AlphaOnnxInference& nn_;
     AlphaMCTSConfig config_;
     std::mt19937 rng_{std::random_device{}()};
+    bool reuseTree_ = true;
+    std::unique_ptr<AlphaMCTSNode> retainedTree_;
+    Board retainedBoard_{};
 };
 
 } // namespace shogi

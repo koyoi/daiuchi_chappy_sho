@@ -645,7 +645,7 @@ int LearningEngine::search(Board& board, int depth, int ply, int alpha, int beta
     {
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         const TranspositionEntry& slot = transposition_[ttIndex];
-        if (slot.key == key && slot.generation == ttGeneration_) {
+        if (slot.key == key && isRecentGeneration(slot.generation)) {
             ttMove = slot.bestMove;
             if (slot.depth >= depth) {
                 if (slot.flag == ExactScore) {
@@ -701,7 +701,7 @@ int LearningEngine::search(Board& board, int depth, int ply, int alpha, int beta
         search(board, depth - 3, ply, alpha, beta, rootSide, false, prevMove);
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         const TranspositionEntry& slot = transposition_[ttIndex];
-        if (slot.key == key && slot.generation == ttGeneration_) {
+        if (slot.key == key && isRecentGeneration(slot.generation)) {
             ttMove = slot.bestMove;
         }
     }
@@ -1168,7 +1168,7 @@ void LearningEngine::orderMoves(const Board& board, MoveList& moves, Color rootS
     {
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         const TranspositionEntry& slot = transposition_[ttIndex];
-        if (slot.key == key && slot.generation == ttGeneration_) {
+        if (slot.key == key && isRecentGeneration(slot.generation)) {
             ttMove = slot.bestMove;
         }
     }
@@ -1299,7 +1299,7 @@ std::vector<Move> LearningEngine::extractPV(Board board, Color rootSide, int max
         {
             std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
             const TranspositionEntry& slot = transposition_[ttIndex];
-            if (slot.key != key || slot.generation != ttGeneration_) {
+            if (slot.key != key || !isRecentGeneration(slot.generation)) {
                 break;
             }
             ttMove = slot.bestMove;

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <iostream>
 
 namespace shogi {
 
@@ -159,14 +160,46 @@ AlphaMCTSResult AlphaMCTSEngine::search(const Board& board, const AlphaMCTSConfi
     auto startTime = std::chrono::steady_clock::now();
     auto deadline = startTime + std::chrono::milliseconds(timeLimitMs > 0 ? timeLimitMs : 100000);
 
-    auto root = std::make_unique<AlphaMCTSNode>();
+    std::unique_ptr<AlphaMCTSNode> root;
+    int reuseVisits = 0;
 
-    if (!expandMoves(root.get(), board)) {
-        return AlphaMCTSResult{};
+    if (reuseTree_ && retainedTree_ && retainedTree_->expanded) {
+        for (auto& child : retainedTree_->children) {
+            if (!child->expanded) continue;
+            for (auto& grandchild : child->children) {
+                Board tmp = retainedBoard_;
+                applyMove(tmp, child->move);
+                applyMove(tmp, grandchild->move);
+                if (tmp.hash == board.hash) {
+                    reuseVisits = grandchild->visitCount.load(std::memory_order_relaxed);
+                    root = std::move(grandchild);
+                    root->parent = nullptr;
+                    goto reuse_done;
+                }
+            }
+        }
     }
-    {
-        AlphaNNOutput rootOut = nn_.evaluate(board);
-        applyNNOutput(root.get(), rootOut, board);
+reuse_done:
+    retainedTree_.reset();
+
+    if (!root) {
+        root = std::make_unique<AlphaMCTSNode>();
+        if (!expandMoves(root.get(), board)) {
+            return AlphaMCTSResult{};
+        }
+        {
+            AlphaNNOutput rootOut = nn_.evaluate(board);
+            applyNNOutput(root.get(), rootOut, board);
+        }
+    } else {
+        std::cout << "info string reusing tree (" << reuseVisits << " sims)" << std::endl;
+        if (!root->expanded) {
+            if (!expandMoves(root.get(), board)) {
+                return AlphaMCTSResult{};
+            }
+            AlphaNNOutput rootOut = nn_.evaluate(board);
+            applyNNOutput(root.get(), rootOut, board);
+        }
     }
 
     if (config_.addNoise) {
@@ -337,6 +370,12 @@ AlphaMCTSResult AlphaMCTSEngine::search(const Board& board, const AlphaMCTSConfi
     result.simulations = simCount;
     result.timeMs = elapsedMs;
     result.pv = extractPV(root.get());
+
+    if (reuseTree_) {
+        retainedBoard_ = board;
+        retainedTree_ = std::move(root);
+    }
+
     return result;
 }
 
