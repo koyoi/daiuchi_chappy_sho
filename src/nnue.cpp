@@ -6,6 +6,20 @@
 #include <fstream>
 #include <random>
 
+#if defined(__AVX2__)
+#define NNUE_USE_AVX2 1
+#include <immintrin.h>
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64))
+// MSVC x64: SSE4.1 always available; AVX2 when /arch:AVX2 is set
+#include <intrin.h>
+#include <immintrin.h>
+// Runtime AVX2 check not needed since we build with /arch:AVX2 in Release
+#define NNUE_USE_AVX2 1
+#elif defined(__SSE4_1__)
+#define NNUE_USE_SSE 1
+#include <smmintrin.h>
+#endif
+
 namespace shogi {
 
 namespace nnue {
@@ -85,14 +99,56 @@ void NNUENetwork::initRandom() {
     loaded_ = false;
 }
 
+namespace {
+
+inline void accAddWeights(std::int32_t* acc, const std::int16_t* weights, int size) {
+#if NNUE_USE_AVX2
+    // Process 8 int32 at a time using AVX2
+    // Expand int16 weights to int32 and add
+    for (int j = 0; j < size; j += 8) {
+        __m256i a = _mm256_load_si256(reinterpret_cast<const __m256i*>(acc + j));
+        __m128i w128 = _mm_load_si128(reinterpret_cast<const __m128i*>(weights + j));
+        __m256i w = _mm256_cvtepi16_epi32(w128);
+        _mm256_store_si256(reinterpret_cast<__m256i*>(acc + j), _mm256_add_epi32(a, w));
+    }
+#elif NNUE_USE_SSE
+    for (int j = 0; j < size; j += 4) {
+        __m128i a = _mm_load_si128(reinterpret_cast<const __m128i*>(acc + j));
+        __m128i w = _mm_cvtepi16_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(weights + j)));
+        _mm_store_si128(reinterpret_cast<__m128i*>(acc + j), _mm_add_epi32(a, w));
+    }
+#else
+    for (int j = 0; j < size; ++j) acc[j] += weights[j];
+#endif
+}
+
+inline void accSubWeights(std::int32_t* acc, const std::int16_t* weights, int size) {
+#if NNUE_USE_AVX2
+    for (int j = 0; j < size; j += 8) {
+        __m256i a = _mm256_load_si256(reinterpret_cast<const __m256i*>(acc + j));
+        __m128i w128 = _mm_load_si128(reinterpret_cast<const __m128i*>(weights + j));
+        __m256i w = _mm256_cvtepi16_epi32(w128);
+        _mm256_store_si256(reinterpret_cast<__m256i*>(acc + j), _mm256_sub_epi32(a, w));
+    }
+#elif NNUE_USE_SSE
+    for (int j = 0; j < size; j += 4) {
+        __m128i a = _mm_load_si128(reinterpret_cast<const __m128i*>(acc + j));
+        __m128i w = _mm_cvtepi16_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(weights + j)));
+        _mm_store_si128(reinterpret_cast<__m128i*>(acc + j), _mm_sub_epi32(a, w));
+    }
+#else
+    for (int j = 0; j < size; ++j) acc[j] -= weights[j];
+#endif
+}
+
+} // namespace
+
 void NNUENetwork::computeAccumulator(const std::vector<int>& activeFeatures, std::int32_t* output) const {
     std::copy(std::begin(l0Biases_), std::end(l0Biases_), output);
     for (int fi : activeFeatures) {
         if (fi < 0 || fi >= nnue::InputDim) continue;
         const std::int16_t* w = &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size];
-        for (int j = 0; j < nnue::L0Size; ++j) {
-            output[j] += w[j];
-        }
+        accAddWeights(output, w, nnue::L0Size);
     }
 }
 
@@ -224,17 +280,13 @@ void NNUENetwork::updateAccumulatorIncremental(const Board& boardAfterMove, cons
         std::copy(parent.black, parent.black + nnue::L0Size, child.black);
         for (int i = 0; i < delta.numBlackRemoved; ++i) {
             const int fi = delta.blackRemoved[i];
-            if (fi >= 0 && fi < nnue::InputDim) {
-                const std::int16_t* w = &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size];
-                for (int j = 0; j < nnue::L0Size; ++j) child.black[j] -= w[j];
-            }
+            if (fi >= 0 && fi < nnue::InputDim)
+                accSubWeights(child.black, &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size], nnue::L0Size);
         }
         for (int i = 0; i < delta.numBlackAdded; ++i) {
             const int fi = delta.blackAdded[i];
-            if (fi >= 0 && fi < nnue::InputDim) {
-                const std::int16_t* w = &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size];
-                for (int j = 0; j < nnue::L0Size; ++j) child.black[j] += w[j];
-            }
+            if (fi >= 0 && fi < nnue::InputDim)
+                accAddWeights(child.black, &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size], nnue::L0Size);
         }
         child.blackKingSq = parent.blackKingSq;
     }
@@ -247,17 +299,13 @@ void NNUENetwork::updateAccumulatorIncremental(const Board& boardAfterMove, cons
         std::copy(parent.white, parent.white + nnue::L0Size, child.white);
         for (int i = 0; i < delta.numWhiteRemoved; ++i) {
             const int fi = delta.whiteRemoved[i];
-            if (fi >= 0 && fi < nnue::InputDim) {
-                const std::int16_t* w = &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size];
-                for (int j = 0; j < nnue::L0Size; ++j) child.white[j] -= w[j];
-            }
+            if (fi >= 0 && fi < nnue::InputDim)
+                accSubWeights(child.white, &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size], nnue::L0Size);
         }
         for (int i = 0; i < delta.numWhiteAdded; ++i) {
             const int fi = delta.whiteAdded[i];
-            if (fi >= 0 && fi < nnue::InputDim) {
-                const std::int16_t* w = &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size];
-                for (int j = 0; j < nnue::L0Size; ++j) child.white[j] += w[j];
-            }
+            if (fi >= 0 && fi < nnue::InputDim)
+                accAddWeights(child.white, &l0Weights_[static_cast<std::size_t>(fi) * nnue::L0Size], nnue::L0Size);
         }
         child.whiteKingSq = parent.whiteKingSq;
     }
