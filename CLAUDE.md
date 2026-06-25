@@ -94,7 +94,7 @@ Entry point (`main.cpp`) selects protocol → `usiLoop()` or `csaLoop()` → `Le
   - **Mate search**: Quick mate search (10% of time, max 300ms) before main search. Tsumero detection extends search time.
   - **Multi-threaded**: Lazy SMP via `Threads` option. Helper threads run independent searches sharing the TT.
 - **Static Exchange Evaluation (SEE)** — Full swap algorithm in `staticExchangeEval()`. Uses `allAttackersOfOcc()` to compute both-color attackers with custom occupancy for x-ray discovery. Iterates captures by least-valuable-attacker order, recomputes attackers after each removal. King can only capture if opponent has no remaining attackers. Used for capture ordering and SEE-based pruning in search.
-- **Training pipeline** (`tools/train_nnue.py`) — PyTorch training with HalfKP sparse tensor input. Sigmoid cross-entropy loss with scale=361. Eval bootstrapping: blends engine evaluation with game outcome labels (`lambda * sigmoid(eval/scale) + (1-lambda) * result`). Multi-GPU via `nn.DataParallel` (supports RTX PRO 6000 ×2). CosineAnnealingLR scheduler. Exports to NNU4 binary format.
+- **Training pipeline** (`tools/train_nnue.py`) — PyTorch training with HalfKP sparse tensor input. Uses `torch.sparse.mm` for the 170K-dim l0 layer to avoid dense materialization. Sigmoid cross-entropy loss with scale=361. Eval bootstrapping: blends engine evaluation with game outcome labels (`lambda * sigmoid(eval/scale) + (1-lambda) * result`). Mixed precision training (AMP) for GPU acceleration. CosineAnnealingLR scheduler. Exports to NNU4 binary format.
 
 ### Piece Encoding
 

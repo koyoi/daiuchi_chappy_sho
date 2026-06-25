@@ -9,7 +9,7 @@ plus hand piece features (76 dims). Total input = 170662 sparse binary features.
 Supports:
 - Sigmoid + cross-entropy loss (default) or MSE + tanh (legacy)
 - Eval bootstrapping: blend engine eval with game outcome
-- Multi-GPU training via DataParallel (e.g. RTX PRO 6000 x2)
+- Mixed precision training (AMP) for GPU acceleration
 
 Usage:
   python tools/train_nnue.py --kifu kifu/floodgate
@@ -372,25 +372,18 @@ def collate_sparse(batch):
             white_rows.append(i)
             white_cols.append(fi)
 
-    if black_rows:
-        black_idx = torch.LongTensor([black_rows, black_cols])
-        black_val = torch.ones(len(black_rows))
-        black_sparse = torch.sparse_coo_tensor(black_idx, black_val, (batch_size, INPUT_DIM))
-    else:
-        black_sparse = torch.sparse_coo_tensor(torch.zeros(2, 0, dtype=torch.long),
-                                                torch.zeros(0), (batch_size, INPUT_DIM))
+    def _make_sparse(rows, cols):
+        if rows:
+            idx = torch.LongTensor([rows, cols])
+            val = torch.ones(len(rows))
+            return torch.sparse_coo_tensor(idx, val, (batch_size, INPUT_DIM)).coalesce()
+        return torch.sparse_coo_tensor(
+            torch.zeros(2, 0, dtype=torch.long), torch.zeros(0), (batch_size, INPUT_DIM)
+        )
 
-    if white_rows:
-        white_idx = torch.LongTensor([white_rows, white_cols])
-        white_val = torch.ones(len(white_rows))
-        white_sparse = torch.sparse_coo_tensor(white_idx, white_val, (batch_size, INPUT_DIM))
-    else:
-        white_sparse = torch.sparse_coo_tensor(torch.zeros(2, 0, dtype=torch.long),
-                                                torch.zeros(0), (batch_size, INPUT_DIM))
-
-    sides_t = torch.stack([torch.tensor(s) for s in sides])
-    targets_t = torch.stack([torch.tensor(t) for t in targets])
-    return black_sparse, white_sparse, sides_t, targets_t
+    sides_t = torch.tensor(np.array(sides), dtype=torch.float32)
+    targets_t = torch.tensor(np.array(targets), dtype=torch.float32)
+    return _make_sparse(black_rows, black_cols), _make_sparse(white_rows, white_cols), sides_t, targets_t
 
 
 class NNUEModel(nn.Module):
@@ -401,10 +394,19 @@ class NNUEModel(nn.Module):
         self.l2 = nn.Linear(L1_SIZE, L2_SIZE)
         self.l3 = nn.Linear(L2_SIZE, 1)
 
+    def _apply_l0(self, x):
+        if x.is_sparse:
+            # sparse mm must run in float32 (not supported in float16)
+            with torch.amp.autocast("cuda", enabled=False):
+                w = self.l0.weight.float()
+                b = self.l0.bias.float()
+                return torch.sparse.mm(x.float(), w.t()) + b
+        return self.l0(x)
+
     def forward(self, black_input, white_input, side):
         # SCReLU: clamp(x, 0, 1)^2
-        acc_black = torch.clamp(self.l0(black_input), 0.0, 1.0) ** 2
-        acc_white = torch.clamp(self.l0(white_input), 0.0, 1.0) ** 2
+        acc_black = torch.clamp(self._apply_l0(black_input), 0.0, 1.0) ** 2
+        acc_white = torch.clamp(self._apply_l0(white_input), 0.0, 1.0) ** 2
         is_black = (side > 0).unsqueeze(1).float()
         own = acc_black * is_black + acc_white * (1.0 - is_black)
         opp = acc_white * is_black + acc_black * (1.0 - is_black)
@@ -432,8 +434,8 @@ def bootstrap_labels(model, dataset, device, lambda_blend=0.5, batch_size=8192):
     soft_labels = []
     with torch.no_grad():
         for black_sparse, white_sparse, side, target in tqdm(loader, desc="Bootstrapping"):
-            black_vec = black_sparse.to_dense().to(device)
-            white_vec = white_sparse.to_dense().to(device)
+            black_vec = black_sparse.to(device)
+            white_vec = white_sparse.to(device)
             side_d = side.to(device)
             raw_pred = model(black_vec, white_vec, side_d)
             engine_prob = torch.sigmoid(raw_pred / EVAL_SCALE)
@@ -582,20 +584,22 @@ def main():
             train_data = NNUEDataset(all_samples[:split])
             val_data = NNUEDataset(all_samples[split:])
 
-    # Multi-GPU
+    # Note: DataParallel is not used because sparse tensors cannot be
+    # scattered across GPUs. The l0 layer uses sparse mm (170K sparse -> 512 dense)
+    # which is memory-efficient on a single GPU, and the remaining layers (l1-l3)
+    # are too small to benefit from parallelism.
     if num_gpus > 1:
-        print(f"Using DataParallel with {num_gpus} GPUs")
-        model = nn.DataParallel(model)
+        print(f"Note: {num_gpus} GPUs detected, using GPU 0 (sparse mm is single-GPU)")
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     dl_workers = 0 if sys.platform == "win32" else min(4, workers)
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
-                              num_workers=dl_workers, pin_memory=device.type == "cuda",
+                              num_workers=dl_workers, pin_memory=False,
                               collate_fn=collate_sparse)
     val_loader = DataLoader(val_data, batch_size=args.batch_size * 2, shuffle=False,
-                            num_workers=dl_workers, pin_memory=device.type == "cuda",
+                            num_workers=dl_workers, pin_memory=False,
                             collate_fn=collate_sparse)
 
     if use_sigmoid:
@@ -604,27 +608,35 @@ def main():
         print("Loss: MSE + tanh (legacy)")
     loss_fn_mse = nn.MSELoss()
 
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    if use_amp:
+        print("Using mixed precision training (AMP)")
+
     best_val_loss = float("inf")
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_loss = 0.0
         train_n = 0
         for black_sparse, white_sparse, side, target in tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}"):
-            black_vec = black_sparse.to_dense().to(device)
-            white_vec = white_sparse.to_dense().to(device)
+            black_vec = black_sparse.to(device)
+            white_vec = white_sparse.to(device)
             side = side.to(device)
             target = target.to(device)
 
-            pred = model(black_vec, white_vec, side)
-            if use_sigmoid:
-                loss = sigmoid_loss(pred, target)
-            else:
-                loss = loss_fn_mse(torch.tanh(pred), target)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                pred = model(black_vec, white_vec, side)
+                if use_sigmoid:
+                    loss = sigmoid_loss(pred, target)
+                else:
+                    loss = loss_fn_mse(torch.tanh(pred), target)
 
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             train_loss += loss.item() * len(target)
             train_n += len(target)
@@ -636,15 +648,17 @@ def main():
         val_n = 0
         with torch.no_grad():
             for black_sparse, white_sparse, side, target in val_loader:
-                black_vec = black_sparse.to_dense().to(device)
-                white_vec = white_sparse.to_dense().to(device)
+                black_vec = black_sparse.to(device)
+                white_vec = white_sparse.to(device)
                 side = side.to(device)
                 target = target.to(device)
-                pred = model(black_vec, white_vec, side)
-                if use_sigmoid:
-                    val_loss += sigmoid_loss(pred, target).item() * len(target)
-                else:
-                    val_loss += loss_fn_mse(torch.tanh(pred), target).item() * len(target)
+                with torch.amp.autocast("cuda", enabled=use_amp):
+                    pred = model(black_vec, white_vec, side)
+                    if use_sigmoid:
+                        vloss = sigmoid_loss(pred, target)
+                    else:
+                        vloss = loss_fn_mse(torch.tanh(pred), target)
+                val_loss += vloss.item() * len(target)
                 val_n += len(target)
 
         tl = train_loss / max(train_n, 1)
@@ -653,8 +667,7 @@ def main():
 
         if vl < best_val_loss:
             best_val_loss = vl
-            raw_model = model.module if isinstance(model, nn.DataParallel) else model
-            torch.save(raw_model.state_dict(), args.model_pt)
+            torch.save(model.state_dict(), args.model_pt)
             export_nnue_bin(model, args.output)
             print(f"  -> Best model saved (val_loss={vl:.6f})")
 
