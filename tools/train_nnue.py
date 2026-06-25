@@ -67,8 +67,8 @@ HAND_FEATURES_PER_COLOR = 38
 HAND_FEATURES = 2 * HAND_FEATURES_PER_COLOR  # 76
 INPUT_DIM = BOARD_FEATURES + HAND_FEATURES   # 170662
 
-L0_SIZE = 256
-L1_SIZE = 64
+L0_SIZE = 512
+L1_SIZE = 32
 L2_SIZE = 32
 WEIGHT_SCALE = 64
 EVAL_SCALE = 361.0  # sigmoid scaling factor (Stockfish convention)
@@ -402,8 +402,9 @@ class NNUEModel(nn.Module):
         self.l3 = nn.Linear(L2_SIZE, 1)
 
     def forward(self, black_input, white_input, side):
-        acc_black = torch.clamp(self.l0(black_input), 0.0, 1.0)
-        acc_white = torch.clamp(self.l0(white_input), 0.0, 1.0)
+        # SCReLU: clamp(x, 0, 1)^2
+        acc_black = torch.clamp(self.l0(black_input), 0.0, 1.0) ** 2
+        acc_white = torch.clamp(self.l0(white_input), 0.0, 1.0) ** 2
         is_black = (side > 0).unsqueeze(1).float()
         own = acc_black * is_black + acc_white * (1.0 - is_black)
         opp = acc_white * is_black + acc_black * (1.0 - is_black)
@@ -475,7 +476,8 @@ def export_nnue_bin(model_or_module: nn.Module, path: str):
     model = model_or_module.module if isinstance(model_or_module, nn.DataParallel) else model_or_module
 
     with open(path, "wb") as f:
-        f.write(b"NNU3")
+        f.write(b"NNU4")
+        f.write(struct.pack('<i', L0_SIZE))
         w0 = model.l0.weight.data.t().cpu()
         w0_q = (w0 * WEIGHT_SCALE).round().clamp(-32768, 32767).to(torch.int16)
         f.write(w0_q.numpy().tobytes())
@@ -490,7 +492,7 @@ def export_nnue_bin(model_or_module: nn.Module, path: str):
         f.write(model.l2.bias.data.cpu().numpy().astype(np.float32).tobytes())
         f.write(model.l3.weight.data.squeeze(0).cpu().numpy().astype(np.float32).tobytes())
         f.write(model.l3.bias.data.cpu().numpy().astype(np.float32).tobytes())
-    print(f"Exported NNU3 weights to {path}")
+    print(f"Exported NNU4 weights to {path}")
 
 
 def load_index(kifu_dir: str) -> list:

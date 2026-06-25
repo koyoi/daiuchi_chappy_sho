@@ -267,20 +267,17 @@ void NNUENetwork::updateAccumulatorIncremental(const Board& boardAfterMove, cons
 
 int NNUENetwork::evaluateFromAccumulator(const nnue::Accumulator& acc, Color perspective) const {
     constexpr float invScale = 1.0f / nnue::WeightScale;
-    float clampedBlack[nnue::L0Size], clampedWhite[nnue::L0Size];
-    for (int i = 0; i < nnue::L0Size; ++i) {
-        clampedBlack[i] = std::clamp(static_cast<float>(acc.black[i]) * invScale, 0.0f, 1.0f);
-        clampedWhite[i] = std::clamp(static_cast<float>(acc.white[i]) * invScale, 0.0f, 1.0f);
-    }
+
+    // SCReLU: clamp(x, 0, 1)^2 on L0 output
+    auto screlu = [](float x) { float c = std::clamp(x, 0.0f, 1.0f); return c * c; };
 
     float concat[2 * nnue::L0Size];
-    if (perspective == Black) {
-        std::copy(clampedBlack, clampedBlack + nnue::L0Size, concat);
-        std::copy(clampedWhite, clampedWhite + nnue::L0Size, concat + nnue::L0Size);
-    } else {
-        std::copy(clampedWhite, clampedWhite + nnue::L0Size, concat);
-        std::copy(clampedBlack, clampedBlack + nnue::L0Size, concat + nnue::L0Size);
-    }
+    const std::int32_t* own = (perspective == Black) ? acc.black : acc.white;
+    const std::int32_t* opp = (perspective == Black) ? acc.white : acc.black;
+    for (int i = 0; i < nnue::L0Size; ++i)
+        concat[i] = screlu(static_cast<float>(own[i]) * invScale);
+    for (int i = 0; i < nnue::L0Size; ++i)
+        concat[nnue::L0Size + i] = screlu(static_cast<float>(opp[i]) * invScale);
 
     float h1[nnue::L1Size];
     for (int j = 0; j < nnue::L1Size; ++j) {
@@ -315,7 +312,10 @@ bool NNUENetwork::load(const std::string& path) {
     char magic[4];
     file.read(magic, 4);
 
-    if (std::strncmp(magic, "NNU3", 4) == 0) {
+    if (std::strncmp(magic, "NNU4", 4) == 0) {
+        std::int32_t storedL0Size = 0;
+        file.read(reinterpret_cast<char*>(&storedL0Size), sizeof(storedL0Size));
+        if (storedL0Size != nnue::L0Size) return false;
         const std::size_t l0WeightSize = static_cast<std::size_t>(nnue::InputDim) * nnue::L0Size;
         l0Weights_.resize(l0WeightSize);
         file.read(reinterpret_cast<char*>(l0Weights_.data()), l0WeightSize * sizeof(std::int16_t));
@@ -338,7 +338,9 @@ bool NNUENetwork::save(const std::string& path) const {
     std::ofstream file(path, std::ios::binary);
     if (!file) return false;
 
-    file.write("NNU3", 4);
+    file.write("NNU4", 4);
+    const std::int32_t storedL0Size = nnue::L0Size;
+    file.write(reinterpret_cast<const char*>(&storedL0Size), sizeof(storedL0Size));
     const std::size_t l0WeightSize = static_cast<std::size_t>(nnue::InputDim) * nnue::L0Size;
     file.write(reinterpret_cast<const char*>(l0Weights_.data()), l0WeightSize * sizeof(std::int16_t));
     file.write(reinterpret_cast<const char*>(l0Biases_), sizeof(l0Biases_));

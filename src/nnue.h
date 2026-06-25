@@ -23,8 +23,8 @@ constexpr int HandFeaturesPerColor = 18 + 4 + 4 + 4 + 4 + 2 + 2; // 38
 constexpr int HandFeatures = 2 * HandFeaturesPerColor; // 76
 constexpr int InputDim = BoardFeatures + HandFeatures; // 170662
 
-constexpr int L0Size = 256;
-constexpr int L1Size = 64;
+constexpr int L0Size = 512;
+constexpr int L1Size = 32;
 constexpr int L2Size = 32;
 constexpr int WeightScale = 64;
 
