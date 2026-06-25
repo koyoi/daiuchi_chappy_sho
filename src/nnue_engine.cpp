@@ -95,24 +95,24 @@ NNUEEngine::NNUEEngine()
     threads_ = defaultThreadCount();
 }
 
-int NNUEEngine::eval(const Board& board, Color rootSide, int ply) const {
+int NNUEEngine::eval(const Board& board, int ply) const {
     if (ply >= 0 && ply < AccStackSize) {
         auto& acc = accStack[ply];
         if (!acc.computed) nnue_.computeAccumulatorFull(board, acc);
-        int incScore = nnue_.evaluateFromAccumulator(acc, rootSide);
+        int score = nnue_.evaluateFromAccumulator(acc, board.side);
 #ifndef NDEBUG
-        int fullScore = nnue_.evaluate(board, rootSide);
-        if (acc.computed && std::abs(incScore - fullScore) > 1) {
-            std::cerr << "NNUE mismatch at ply " << ply << ": inc=" << incScore << " full=" << fullScore << std::endl;
+        int fullScore = nnue_.evaluate(board, board.side);
+        if (acc.computed && std::abs(score - fullScore) > 1) {
+            std::cerr << "NNUE mismatch at ply " << ply << ": inc=" << score << " full=" << fullScore << std::endl;
         }
 #endif
-        return incScore;
+        return score;
     }
-    return nnue_.evaluate(board, rootSide);
+    return nnue_.evaluate(board, board.side);
 }
 
 void NNUEEngine::workerSearch(const Board& board, const MoveList& legal,
-                               Color rootSide, int threadId) const {
+                               int threadId) const {
     constexpr int SkipSize[]  = {1,1,2,2,2,2,3,3,3,3,3,3,4,4,4,4,4,4,4,4};
     constexpr int SkipPhase[] = {0,0,0,1,0,1,0,1,2,0,1,2,0,1,2,3,0,1,2,3};
     const int si = threadId % 20;
@@ -136,7 +136,7 @@ void NNUEEngine::workerSearch(const Board& board, const MoveList& legal,
             nnue_.updateAccumulatorIncremental(accStack[0], delta, accStack[1]);
             int sd = depth - 1;
             if (pw > 0 && depth >= 3 && i >= pw) sd = std::max(0, depth - 3);
-            scores[i] = search(next, sd, 1, -MateScore, MateScore, rootSide, true, moves[i]);
+            scores[i] = -search(next, sd, 1, -MateScore, MateScore, true, moves[i]);
         }
 
         if (shouldStop()) break;
@@ -236,14 +236,14 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
         }
     }
 
-    orderMoves(board, legal, rootSide, 0);
+    orderMoves(board, legal, 0);
     clearSearchTables();
 
     std::vector<std::thread> helpers;
     if (threads_ > 1 && legal.size() > 1) {
         for (int t = 1; t < threads_; ++t) {
-            helpers.emplace_back([this, &board, &legal, rootSide, t]() {
-                workerSearch(board, legal, rootSide, t);
+            helpers.emplace_back([this, &board, &legal, t]() {
+                workerSearch(board, legal, t);
             });
         }
     }
@@ -263,7 +263,6 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
             aspirationBeta = prevIterScore + aspirationWindow_;
         }
 
-        // Score root moves (main thread only; helpers run workerSearch in parallel)
         std::vector<int> scores(legal.size(), std::numeric_limits<int>::min());
         {
             int runningAlpha = aspirationAlpha;
@@ -275,12 +274,12 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
                 nnue_.updateAccumulatorIncremental(accStack[0], delta, accStack[1]);
                 int sd = depth - 1;
                 if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) sd = std::max(0, depth - 3);
-                scores[i] = search(next, sd, 1, runningAlpha, aspirationBeta, rootSide, true, legal[i]);
-                runningAlpha = std::max(runningAlpha, scores[i]);
+                int val = -search(next, sd, 1, -aspirationBeta, -runningAlpha, true, legal[i]);
+                scores[i] = val;
+                runningAlpha = std::max(runningAlpha, val);
             }
         }
 
-        // Re-search with full window if aspiration failed
         if (!shouldStop() && depth >= 2 && std::abs(prevIterScore) < MateScore / 2) {
             int depthBest = std::numeric_limits<int>::min();
             for (int i = 0; i < static_cast<int>(legal.size()); ++i) {
@@ -288,15 +287,16 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
             }
             if (depthBest != std::numeric_limits<int>::min() && (depthBest <= aspirationAlpha || depthBest >= aspirationBeta)) {
                 int runningAlpha = -MateScore;
-                for (int i = 0; i < legal.size() && !shouldStop(); ++i) {
+                for (int i = 0; i < static_cast<int>(legal.size()) && !shouldStop(); ++i) {
                     auto delta = nnue_.computeMoveDelta(board, legal[i]);
                     Board next = board;
                     applyMove(next, legal[i]);
                     nnue_.updateAccumulatorIncremental(accStack[0], delta, accStack[1]);
                     int sd = depth - 1;
                     if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) sd = std::max(0, depth - 3);
-                    scores[i] = search(next, sd, 1, runningAlpha, MateScore, rootSide, true, legal[i]);
-                    runningAlpha = std::max(runningAlpha, scores[i]);
+                    int val = -search(next, sd, 1, -MateScore, -runningAlpha, true, legal[i]);
+                    scores[i] = val;
+                    runningAlpha = std::max(runningAlpha, val);
                 }
             }
         }
@@ -305,7 +305,7 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
 
         int depthBestScore = std::numeric_limits<int>::min();
         std::vector<Move> depthBestMoves;
-        for (int i = 0; i < legal.size(); ++i) {
+        for (int i = 0; i < static_cast<int>(legal.size()); ++i) {
             if (scores[i] == std::numeric_limits<int>::min()) continue;
             if (scores[i] > depthBestScore) {
                 depthBestScore = scores[i];
@@ -330,7 +330,7 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
             info.pv.push_back(bestMoves.front());
             Board pvBoard = board;
             applyMove(pvBoard, bestMoves.front());
-            auto pvTail = extractPV(pvBoard, rootSide, completedDepth);
+            auto pvTail = extractPV(pvBoard, completedDepth);
             info.pv.insert(info.pv.end(), pvTail.begin(), pvTail.end());
             if (std::abs(depthBestScore) >= MateScore) {
                 info.isMate = true;
@@ -341,7 +341,6 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
             setLastSearchInfo(info);
             if (infoCallback) infoCallback(info);
 
-            // Reorder root moves
             struct IndexedScore { int index; int score; };
             std::vector<IndexedScore> ranked(legal.size());
             for (int i = 0; i < static_cast<int>(legal.size()); ++i) ranked[i] = {i, scores[i]};
@@ -383,13 +382,13 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
     return selected;
 }
 
-int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Color rootSide, bool allowNullMove, const Move& prevMove) const {
+// NegaMax search: always returns score from the perspective of board.side
+int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bool allowNullMove, const Move& prevMove) const {
     nodes_.fetch_add(1);
-    if (shouldStop()) return eval(board, rootSide, ply);
+    if (shouldStop()) return eval(board, ply);
 
     const int alphaOriginal = alpha;
-    const int betaOriginal = beta;
-    const std::uint64_t key = boardHash(board, rootSide);
+    const std::uint64_t key = boardHash(board);
     const int ttIndex = static_cast<int>(key & TTMask);
     const int lockIndex = static_cast<int>((key >> TTBits) % LockCount);
     Move ttMove{};
@@ -410,130 +409,54 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
     auto legal = generateLegalMoves(board, true);
     if (legal.empty()) {
         if (isKingAttacked(board, board.side))
-            return board.side == rootSide ? -MateScore - depth : MateScore + depth;
+            return -MateScore - depth;
         return 0;
     }
 
-    if (depth <= 0) return quiescence(board, qDepth_, ply, alpha, beta, rootSide);
+    if (depth <= 0) return quiescence(board, qDepth_, ply, alpha, beta);
 
     const bool inCheck = isKingAttacked(board, board.side);
-    const bool maximizing = board.side == rootSide;
 
+    // Null move pruning
     if (allowNullMove && !inCheck && depth >= nmpMinDepth_ && ply > 0) {
         if (ply + 1 < AccStackSize) accStack[ply + 1] = accStack[ply];
         NullMoveUndoInfo nullUndo;
         applyNullMove(board, nullUndo);
-        const int nullVal = search(board, depth - 1 - nmpReduction_, ply + 1, alpha, beta, rootSide, false, Move{});
+        const int nullVal = -search(board, depth - 1 - nmpReduction_, ply + 1, -beta, -beta + 1, false, Move{});
         undoNullMove(board, nullUndo);
-        if (maximizing) { if (nullVal >= beta) return nullVal; }
-        else { if (nullVal <= alpha) return nullVal; }
+        if (nullVal >= beta) return nullVal;
     }
 
-    int staticEval = eval(board, rootSide, ply);
+    int staticEval = eval(board, ply);
 
     // Reverse futility pruning
     if (!inCheck && depth <= 3 && ply > 0 && std::abs(alpha) < MateScore / 2 && std::abs(beta) < MateScore / 2) {
         const int rfpMargin = depth * 200;
-        if (maximizing && staticEval - rfpMargin >= beta) return staticEval;
-        if (!maximizing && staticEval + rfpMargin <= alpha) return staticEval;
+        if (staticEval - rfpMargin >= beta) return staticEval;
     }
 
     // Razoring
     if (!inCheck && depth <= 2 && ply > 0 && std::abs(alpha) < MateScore / 2 && std::abs(beta) < MateScore / 2) {
         const int razorMargin = 300 + depth * 200;
-        if (maximizing && staticEval + razorMargin <= alpha)
-            return quiescence(board, qDepth_, ply, alpha, beta, rootSide);
-        if (!maximizing && staticEval - razorMargin >= beta)
-            return quiescence(board, qDepth_, ply, alpha, beta, rootSide);
+        if (staticEval + razorMargin <= alpha)
+            return quiescence(board, qDepth_, ply, alpha, beta);
     }
 
+    // IID
     if (ttMove.to < 0 && depth >= iidMinDepth_ && !inCheck) {
-        search(board, depth - 3, ply, alpha, beta, rootSide, false, prevMove);
+        search(board, depth - 3, ply, alpha, beta, false, prevMove);
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         const TranspositionEntry& slot = transposition_[ttIndex];
         if (slot.key == key && isRecentGeneration(slot.generation)) ttMove = slot.bestMove;
     }
 
-    orderMoves(board, legal, rootSide, ply, prevMove);
+    orderMoves(board, legal, ply, prevMove);
 
     const bool canFutilityPrune = !inCheck && (depth == 1 || depth == 2);
     const int futilityMargin = depth == 1 ? futilityMargin1_ : futilityMargin2_;
     const int lmpThreshold = 3 + depth * depth;
 
-    if (maximizing) {
-        int best = std::numeric_limits<int>::min();
-        Move bestMoveLocal{};
-        Move quietsTried[MoveList::Capacity];
-        int quietsCount = 0;
-        int moveIndex = 0;
-        bool anySearched = false;
-
-        for (const Move& move : legal) {
-            const bool isQuiet = (move.isDrop() || board.squares[move.to] == 0) && !move.promote;
-            const bool isCheck = givesCheck(board, move);
-            if (canFutilityPrune && isQuiet && !isCheck && staticEval + futilityMargin <= alpha) { ++moveIndex; continue; }
-            if (depth <= 3 && moveIndex >= lmpThreshold && isQuiet && !isCheck && !inCheck && anySearched) { ++moveIndex; continue; }
-
-            auto delta = nnue_.computeMoveDelta(board, move);
-            UndoInfo undo;
-            applyMove(board, move, undo);
-            if (ply + 1 < AccStackSize) nnue_.updateAccumulatorIncremental(accStack[ply], delta, accStack[ply + 1]);
-            const bool givesCheckNow = isKingAttacked(board, board.side);
-            int extension = (givesCheckNow && ply < MaxPly - 10) ? 1 : 0;
-            const int newDepth = depth - 1 + extension;
-
-            int val = 0;
-            if (moveIndex == 0) {
-                val = search(board, newDepth, ply + 1, alpha, beta, rootSide, true, move);
-            } else {
-                bool needsFullWindow = false;
-                if (depth >= lmrMinDepth_ && moveIndex >= lmrFullDepthMoves_ && isQuiet && !isCheck && !inCheck && !givesCheckNow) {
-                    int R = 1 + (depth >= 6 ? 1 : 0) + (moveIndex >= 10 ? 1 : 0);
-                    val = search(board, std::max(1, newDepth - R), ply + 1, alpha, alpha + 1, rootSide, true, move);
-                    if (val > alpha) {
-                        val = search(board, newDepth, ply + 1, alpha, alpha + 1, rootSide, true, move);
-                        if (val > alpha && val < beta) needsFullWindow = true;
-                    }
-                } else {
-                    val = search(board, newDepth, ply + 1, alpha, alpha + 1, rootSide, true, move);
-                    if (val > alpha && val < beta) needsFullWindow = true;
-                }
-                if (needsFullWindow) val = search(board, newDepth, ply + 1, alpha, beta, rootSide, true, move);
-            }
-
-            undoMove(board, move, undo);
-            anySearched = true;
-            if (val > best) { best = val; bestMoveLocal = move; }
-            alpha = std::max(alpha, best);
-            if (alpha >= beta) {
-                if (isQuiet) {
-                    storeKiller(ply, move);
-                    updateHistory(board.side, move, depth, true);
-                    storeCounterMove(board.side, prevMove, move);
-                    for (int q = 0; q < quietsCount; ++q) updateHistory(board.side, quietsTried[q], depth, false);
-                }
-                break;
-            }
-            if (isQuiet && quietsCount < MoveList::Capacity) quietsTried[quietsCount++] = move;
-            ++moveIndex;
-        }
-
-        if (!anySearched) return canFutilityPrune ? staticEval : (board.side == rootSide ? -MateScore - depth : MateScore + depth);
-
-        {
-            std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
-            TranspositionEntry& slot = transposition_[ttIndex];
-            if (slot.generation != ttGeneration_ || depth >= slot.depth) {
-                slot.key = key; slot.depth = depth; slot.score = best; slot.bestMove = bestMoveLocal;
-                slot.flag = best <= alphaOriginal ? UpperBound : (best >= betaOriginal ? LowerBound : ExactScore);
-                slot.generation = ttGeneration_;
-            }
-        }
-        return best;
-    }
-
-    // Minimizing
-    int best = std::numeric_limits<int>::max();
+    int best = std::numeric_limits<int>::min();
     Move bestMoveLocal{};
     Move quietsTried[MoveList::Capacity];
     int quietsCount = 0;
@@ -543,7 +466,7 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
     for (const Move& move : legal) {
         const bool isQuiet = (move.isDrop() || board.squares[move.to] == 0) && !move.promote;
         const bool isCheck = givesCheck(board, move);
-        if (canFutilityPrune && isQuiet && !isCheck && staticEval - futilityMargin >= beta) { ++moveIndex; continue; }
+        if (canFutilityPrune && isQuiet && !isCheck && staticEval + futilityMargin <= alpha) { ++moveIndex; continue; }
         if (depth <= 3 && moveIndex >= lmpThreshold && isQuiet && !isCheck && !inCheck && anySearched) { ++moveIndex; continue; }
 
         auto delta = nnue_.computeMoveDelta(board, move);
@@ -556,27 +479,27 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
 
         int val = 0;
         if (moveIndex == 0) {
-            val = search(board, newDepth, ply + 1, alpha, beta, rootSide, true, move);
+            val = -search(board, newDepth, ply + 1, -beta, -alpha, true, move);
         } else {
             bool needsFullWindow = false;
             if (depth >= lmrMinDepth_ && moveIndex >= lmrFullDepthMoves_ && isQuiet && !isCheck && !inCheck && !givesCheckNow) {
                 int R = 1 + (depth >= 6 ? 1 : 0) + (moveIndex >= 10 ? 1 : 0);
-                val = search(board, std::max(1, newDepth - R), ply + 1, beta - 1, beta, rootSide, true, move);
-                if (val < beta) {
-                    val = search(board, newDepth, ply + 1, beta - 1, beta, rootSide, true, move);
-                    if (val < beta && val > alpha) needsFullWindow = true;
+                val = -search(board, std::max(1, newDepth - R), ply + 1, -alpha - 1, -alpha, true, move);
+                if (val > alpha) {
+                    val = -search(board, newDepth, ply + 1, -alpha - 1, -alpha, true, move);
+                    if (val > alpha && val < beta) needsFullWindow = true;
                 }
             } else {
-                val = search(board, newDepth, ply + 1, beta - 1, beta, rootSide, true, move);
-                if (val < beta && val > alpha) needsFullWindow = true;
+                val = -search(board, newDepth, ply + 1, -alpha - 1, -alpha, true, move);
+                if (val > alpha && val < beta) needsFullWindow = true;
             }
-            if (needsFullWindow) val = search(board, newDepth, ply + 1, alpha, beta, rootSide, true, move);
+            if (needsFullWindow) val = -search(board, newDepth, ply + 1, -beta, -alpha, true, move);
         }
 
         undoMove(board, move, undo);
         anySearched = true;
-        if (val < best) { best = val; bestMoveLocal = move; }
-        beta = std::min(beta, best);
+        if (val > best) { best = val; bestMoveLocal = move; }
+        alpha = std::max(alpha, best);
         if (alpha >= beta) {
             if (isQuiet) {
                 storeKiller(ply, move);
@@ -590,67 +513,43 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, Co
         ++moveIndex;
     }
 
-    if (!anySearched) return canFutilityPrune ? staticEval : (board.side == rootSide ? -MateScore - depth : MateScore + depth);
+    if (!anySearched) return canFutilityPrune ? staticEval : -MateScore - depth;
 
     {
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         TranspositionEntry& slot = transposition_[ttIndex];
         if (slot.generation != ttGeneration_ || depth >= slot.depth) {
             slot.key = key; slot.depth = depth; slot.score = best; slot.bestMove = bestMoveLocal;
-            slot.flag = best <= alphaOriginal ? UpperBound : (best >= betaOriginal ? LowerBound : ExactScore);
+            slot.flag = best <= alphaOriginal ? UpperBound : (best >= beta ? LowerBound : ExactScore);
             slot.generation = ttGeneration_;
         }
     }
     return best;
 }
 
-int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta, Color rootSide) const {
+// NegaMax quiescence: returns score from the perspective of board.side
+int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta) const {
     nodes_.fetch_add(1);
-    if (shouldStop()) return eval(board, rootSide, ply);
+    if (shouldStop()) return eval(board, ply);
 
     auto legal = generateLegalMoves(board, true);
     if (legal.empty()) {
         if (isKingAttacked(board, board.side))
-            return board.side == rootSide ? -MateScore - depth : MateScore + depth;
+            return -MateScore - depth;
         return 0;
     }
 
-    int standPat = eval(board, rootSide, ply);
+    int standPat = eval(board, ply);
     if (depth <= 0) return standPat;
 
-    const bool maximizing = board.side == rootSide;
     const bool inCheck = isKingAttacked(board, board.side);
-    orderMoves(board, legal, rootSide, ply);
+    orderMoves(board, legal, ply);
 
-    if (maximizing) {
-        if (standPat >= beta) return standPat;
-        if (!inCheck && standPat + deltaMargin_ <= alpha) return standPat;
-        alpha = std::max(alpha, standPat);
-        int best = standPat;
-        for (const Move& move : legal) {
-            if (!inCheck) {
-                const bool capture = !move.isDrop() && board.squares[move.to] != 0;
-                const bool promotion = move.promote;
-                if (!capture && !promotion) {
-                    if (depth < qCheckDepthMin_ || !givesCheck(board, move)) continue;
-                }
-            }
-            auto delta = nnue_.computeMoveDelta(board, move);
-            UndoInfo undo;
-            applyMove(board, move, undo);
-            if (ply + 1 < AccStackSize) nnue_.updateAccumulatorIncremental(accStack[ply], delta, accStack[ply + 1]);
-            best = std::max(best, quiescence(board, depth - 1, ply + 1, alpha, beta, rootSide));
-            undoMove(board, move, undo);
-            alpha = std::max(alpha, best);
-            if (alpha >= beta) break;
-        }
-        return best;
-    }
-
-    if (standPat <= alpha) return standPat;
-    if (!inCheck && standPat - deltaMargin_ >= beta) return standPat;
-    beta = std::min(beta, standPat);
+    if (standPat >= beta) return standPat;
+    if (!inCheck && standPat + deltaMargin_ <= alpha) return standPat;
+    alpha = std::max(alpha, standPat);
     int best = standPat;
+
     for (const Move& move : legal) {
         if (!inCheck) {
             const bool capture = !move.isDrop() && board.squares[move.to] != 0;
@@ -663,16 +562,17 @@ int NNUEEngine::quiescence(Board& board, int depth, int ply, int alpha, int beta
         UndoInfo undo;
         applyMove(board, move, undo);
         if (ply + 1 < AccStackSize) nnue_.updateAccumulatorIncremental(accStack[ply], delta, accStack[ply + 1]);
-        best = std::min(best, quiescence(board, depth - 1, ply + 1, alpha, beta, rootSide));
+        int val = -quiescence(board, depth - 1, ply + 1, -beta, -alpha);
         undoMove(board, move, undo);
-        beta = std::min(beta, best);
+        if (val > best) best = val;
+        alpha = std::max(alpha, best);
         if (alpha >= beta) break;
     }
     return best;
 }
 
-void NNUEEngine::orderMoves(const Board& board, MoveList& moves, Color rootSide, int ply, const Move& prevMove) const {
-    const std::uint64_t key = boardHash(board, rootSide);
+void NNUEEngine::orderMoves(const Board& board, MoveList& moves, int ply, const Move& prevMove) const {
+    const std::uint64_t key = boardHash(board);
     const int ttIndex = static_cast<int>(key & TTMask);
     const int lockIndex = static_cast<int>((key >> TTBits) % LockCount);
     Move ttMove{};
@@ -684,13 +584,12 @@ void NNUEEngine::orderMoves(const Board& board, MoveList& moves, Color rootSide,
     struct ScoredMove { Move move; int score; };
     const int n = moves.size();
     ScoredMove scored[MoveList::Capacity];
-    for (int i = 0; i < n; ++i) scored[i] = {moves[i], moveOrderScore(board, moves[i], rootSide, ply, ttMove, prevMove)};
+    for (int i = 0; i < n; ++i) scored[i] = {moves[i], moveOrderScore(board, moves[i], ply, ttMove, prevMove)};
     std::stable_sort(scored, scored + n, [](const ScoredMove& a, const ScoredMove& b) { return a.score > b.score; });
     for (int i = 0; i < n; ++i) moves[i] = scored[i].move;
 }
 
-int NNUEEngine::moveOrderScore(const Board& board, const Move& move, Color rootSide, int ply, const Move& ttMove, const Move& prevMove) const {
-    (void)rootSide;
+int NNUEEngine::moveOrderScore(const Board& board, const Move& move, int ply, const Move& ttMove, const Move& prevMove) const {
     if (ttMove.to >= 0 && sameMove(move, ttMove)) return 20000;
 
     int score = 0;
@@ -767,8 +666,8 @@ bool NNUEEngine::shouldStop() const {
     return false;
 }
 
-std::uint64_t NNUEEngine::boardHash(const Board& board, Color rootSide) const {
-    return board.hash ^ (rootSide == Black ? 0x9E3779B97F4A7C15ULL : 0x6C62272E07BB0142ULL);
+std::uint64_t NNUEEngine::boardHash(const Board& board) const {
+    return board.hash ^ (board.side == Black ? 0x9E3779B97F4A7C15ULL : 0x6C62272E07BB0142ULL);
 }
 
 void NNUEEngine::setLastSearchInfo(const SearchInfo& info) const {
@@ -781,10 +680,10 @@ SearchInfo NNUEEngine::lastSearchInfo() const {
     return lastSearchInfo_;
 }
 
-std::vector<Move> NNUEEngine::extractPV(Board board, Color rootSide, int maxDepth) const {
+std::vector<Move> NNUEEngine::extractPV(Board board, int maxDepth) const {
     std::vector<Move> pv;
     for (int i = 0; i < maxDepth; ++i) {
-        const std::uint64_t key = boardHash(board, rootSide);
+        const std::uint64_t key = boardHash(board);
         const int ttIndex = static_cast<int>(key & TTMask);
         const int lockIndex = static_cast<int>((key >> TTBits) % LockCount);
         Move ttMove;

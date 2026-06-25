@@ -43,22 +43,22 @@ public:
     void setRootPruneWidth(int w) { rootPruneWidth_ = w; }
 
 private:
-    int search(Board& board, int depth, int ply, int alpha, int beta, Color rootSide, bool allowNullMove = true, const Move& prevMove = Move{}) const;
-    int quiescence(Board& board, int depth, int ply, int alpha, int beta, Color rootSide) const;
-    std::vector<Move> extractPV(Board board, Color rootSide, int maxDepth) const;
-    void orderMoves(const Board& board, MoveList& moves, Color rootSide, int ply, const Move& prevMove = Move{}) const;
-    int moveOrderScore(const Board& board, const Move& move, Color rootSide, int ply, const Move& ttMove, const Move& prevMove = Move{}) const;
+    int search(Board& board, int depth, int ply, int alpha, int beta, bool allowNullMove = true, const Move& prevMove = Move{}) const;
+    int quiescence(Board& board, int depth, int ply, int alpha, int beta) const;
+    std::vector<Move> extractPV(Board board, int maxDepth) const;
+    void orderMoves(const Board& board, MoveList& moves, int ply, const Move& prevMove = Move{}) const;
+    int moveOrderScore(const Board& board, const Move& move, int ply, const Move& ttMove, const Move& prevMove = Move{}) const;
     bool shouldStop() const;
-    std::uint64_t boardHash(const Board& board, Color rootSide) const;
+    std::uint64_t boardHash(const Board& board) const;
     void setLastSearchInfo(const SearchInfo& info) const;
     int depthLimit() const;
     void clearSearchTables() const;
     void storeKiller(int ply, const Move& move) const;
     void updateHistory(Color side, const Move& move, int depth, bool good) const;
     void storeCounterMove(Color side, const Move& prevMove, const Move& counterMove) const;
-    void workerSearch(const Board& board, const MoveList& legal, Color rootSide, int threadId) const;
+    void workerSearch(const Board& board, const MoveList& legal, int threadId) const;
 
-    int eval(const Board& board, Color rootSide, int ply) const;
+    int eval(const Board& board, int ply) const;
 
     struct TranspositionEntry {
         std::uint64_t key = 0;
