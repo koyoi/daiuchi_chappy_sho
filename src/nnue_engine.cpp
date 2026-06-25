@@ -178,14 +178,23 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
     if (limits.moveTimeMs > 0) {
         optimumTime = limits.moveTimeMs;
         maximumTime = limits.moveTimeMs;
+    } else if (limits.byoyomiMs > 0) {
+        const int byoFloor = std::max(50, limits.byoyomiMs - 200);
+        const int byoCeil  = std::max(50, limits.byoyomiMs - 100);
+        if (limits.remainingMs > 0) {
+            const int movesLeft = std::max(10, 50 - board.moveNumber);
+            int base = limits.remainingMs / movesLeft + limits.byoyomiMs;
+            optimumTime = std::max(byoFloor, std::min(base, limits.remainingMs / 3 + limits.byoyomiMs));
+            maximumTime = std::max(byoCeil, std::min(base * 2, limits.remainingMs * 2 / 3 + limits.byoyomiMs));
+        } else {
+            optimumTime = byoFloor;
+            maximumTime = byoCeil;
+        }
     } else if (limits.remainingMs > 0) {
         const int movesLeft = std::max(10, 50 - board.moveNumber);
         int base = limits.remainingMs / movesLeft + limits.incrementMs * 3 / 4;
         optimumTime = std::clamp(base, 50, limits.remainingMs / 3);
         maximumTime = std::clamp(base * 3, 100, limits.remainingMs * 2 / 3);
-    } else if (limits.byoyomiMs > 0) {
-        optimumTime = std::max(50, limits.byoyomiMs - 200);
-        maximumTime = std::max(50, limits.byoyomiMs - 100);
     }
     optimumTime = std::clamp(optimumTime, 50, 600000);
     maximumTime = std::clamp(maximumTime, optimumTime, 600000);

@@ -293,13 +293,13 @@ reuse_done:
 
             if (bestChild) {
                 SearchInfo info;
-                info.depth = simCount;
+                info.pv = extractPV(root.get());
+                info.depth = static_cast<int>(info.pv.size());
                 info.scoreCp = static_cast<int>(bestChild->q() * 1000);
                 info.nodes = simCount;
                 info.timeMs = elapsed;
                 info.bestMove = bestChild->move;
                 info.hasBestMove = true;
-                info.pv = extractPV(root.get());
                 callback(info);
             }
         }

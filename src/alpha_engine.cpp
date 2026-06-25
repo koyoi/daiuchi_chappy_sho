@@ -117,13 +117,13 @@ Move AlphaEngineWrapper::chooseMove(const Board& board, const SearchLimits& limi
     lastMCTSResult_ = result;
 
     SearchInfo info;
-    info.depth = result.simulations;
+    info.pv = result.pv;
+    info.depth = static_cast<int>(result.pv.size());
     info.scoreCp = static_cast<int>(result.winRate * 1000);
     info.nodes = result.simulations;
     info.timeMs = result.timeMs;
     info.bestMove = result.bestMove;
     info.hasBestMove = result.bestMove.to >= 0;
-    info.pv = result.pv;
     {
         std::lock_guard<std::mutex> lock(infoMutex_);
         lastSearchInfo_ = info;
