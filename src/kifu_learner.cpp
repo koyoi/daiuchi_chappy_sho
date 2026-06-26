@@ -25,6 +25,7 @@ namespace {
 struct TrainingSample {
     std::string sfen;
     std::string usiMove;
+    double externalLabel = -1.0;
 };
 
 std::vector<TrainingSample> loadTrainingFile(const std::string& path) {
@@ -34,14 +35,28 @@ std::vector<TrainingSample> loadTrainingFile(const std::string& path) {
         std::cerr << "Cannot open training file: " << path << std::endl;
         return samples;
     }
+    int labeled = 0;
     std::string line;
     while (std::getline(in, line)) {
         if (line.empty() || line[0] == '#') continue;
-        auto tab = line.find('\t');
-        if (tab == std::string::npos) continue;
-        samples.push_back({line.substr(0, tab), line.substr(tab + 1)});
+        auto tab1 = line.find('\t');
+        if (tab1 == std::string::npos) continue;
+        std::string sfen = line.substr(0, tab1);
+        std::string rest = line.substr(tab1 + 1);
+        auto tab2 = rest.find('\t');
+        if (tab2 != std::string::npos) {
+            std::string usiMove = rest.substr(0, tab2);
+            double label = -1.0;
+            try { label = std::stod(rest.substr(tab2 + 1)); } catch (...) {}
+            samples.push_back({sfen, usiMove, label});
+            if (label >= 0.0) ++labeled;
+        } else {
+            samples.push_back({sfen, rest, -1.0});
+        }
     }
-    std::cerr << "Loaded " << samples.size() << " training samples" << std::endl;
+    std::cerr << "Loaded " << samples.size() << " training samples";
+    if (labeled > 0) std::cerr << " (" << labeled << " with external labels)";
+    std::cerr << std::endl;
     return samples;
 }
 
@@ -231,37 +246,46 @@ int extractFeatures(const ExtractFeaturesConfig& config) {
         applyMove(after, move);
         FeatureVector posFeatures = evaluator.extractFeatures(after, perspective);
 
-        double eval = static_cast<double>(evaluator.evaluate(after, perspective));
-        double evalWp = 1.0 / (1.0 + std::exp(-eval / evalScale));
-        double posLabel = std::clamp(evalLambda * evalWp + (1.0 - evalLambda) * 0.85, 0.01, 0.99);
-        out << posLabel;
-        for (int i = 0; i < FeatureCount; ++i) {
-            out << '\t' << posFeatures[i];
-        }
-        out << '\n';
-        ++written;
+        if (sample.externalLabel >= 0.0) {
+            out << sample.externalLabel;
+            for (int i = 0; i < FeatureCount; ++i) {
+                out << '\t' << posFeatures[i];
+            }
+            out << '\n';
+            ++written;
+        } else {
+            double eval = static_cast<double>(evaluator.evaluate(after, perspective));
+            double evalWp = 1.0 / (1.0 + std::exp(-eval / evalScale));
+            double posLabel = std::clamp(evalLambda * evalWp + (1.0 - evalLambda) * 0.85, 0.01, 0.99);
+            out << posLabel;
+            for (int i = 0; i < FeatureCount; ++i) {
+                out << '\t' << posFeatures[i];
+            }
+            out << '\n';
+            ++written;
 
-        auto legal = generateLegalMoves(board, true);
-        std::vector<Move> others;
-        for (const Move& m : legal) {
-            if (!sameMove(m, move)) others.push_back(m);
-        }
-        if (!others.empty()) {
-            std::shuffle(others.begin(), others.end(), rng);
-            int negCount = std::min(config.negatives, static_cast<int>(others.size()));
-            for (int n = 0; n < negCount; ++n) {
-                Board neg = board;
-                applyMove(neg, others[n]);
-                FeatureVector negFeatures = evaluator.extractFeatures(neg, perspective);
-                double negEval = static_cast<double>(evaluator.evaluate(neg, perspective));
-                double negWp = 1.0 / (1.0 + std::exp(-negEval / evalScale));
-                double negLabel = std::clamp(evalLambda * negWp + (1.0 - evalLambda) * 0.15, 0.01, 0.99);
-                out << negLabel;
-                for (int i = 0; i < FeatureCount; ++i) {
-                    out << '\t' << negFeatures[i];
+            auto legal = generateLegalMoves(board, true);
+            std::vector<Move> others;
+            for (const Move& m : legal) {
+                if (!sameMove(m, move)) others.push_back(m);
+            }
+            if (!others.empty()) {
+                std::shuffle(others.begin(), others.end(), rng);
+                int negCount = std::min(config.negatives, static_cast<int>(others.size()));
+                for (int n = 0; n < negCount; ++n) {
+                    Board neg = board;
+                    applyMove(neg, others[n]);
+                    FeatureVector negFeatures = evaluator.extractFeatures(neg, perspective);
+                    double negEval = static_cast<double>(evaluator.evaluate(neg, perspective));
+                    double negWp = 1.0 / (1.0 + std::exp(-negEval / evalScale));
+                    double negLabel = std::clamp(evalLambda * negWp + (1.0 - evalLambda) * 0.15, 0.01, 0.99);
+                    out << negLabel;
+                    for (int i = 0; i < FeatureCount; ++i) {
+                        out << '\t' << negFeatures[i];
+                    }
+                    out << '\n';
+                    ++written;
                 }
-                out << '\n';
-                ++written;
             }
         }
 

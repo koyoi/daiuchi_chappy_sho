@@ -129,7 +129,8 @@ NNUE engine: Bucket-based TT with 4 entries per bucket. Default 256 MB (configur
 | `src/mcts_usi_protocol.cpp` | USI protocol loop for MCTS engine |
 | `tools/mlp_eval.py` | PyTorch MLP model training (BatchNorm+LeakyReLU+Dropout, BCEWithLogitsLoss) |
 | `tools/export_mlp.py` | PyTorch MLP → text weights converter (BatchNorm fusion) |
-| `tools/train_mlp.py` | MLP training pipeline (kifu parse → feature extract → train → export) |
+| `tools/train_mlp.py` | MLP training pipeline (kifu parse → [MCTS label] → feature extract → train → export) |
+| `tools/mcts_label.py` | Label positions with strong USI engine (MCTS/Alpha/NNUE) for MLP training |
 | `tools/export_onnx.py` | PyTorch Transformer → ONNX model converter |
 | `tools/train.py` | Transformer model training (MCTS engine) |
 | `tools/nn_eval.py` | Python-side NN evaluation server for MCTS engine |

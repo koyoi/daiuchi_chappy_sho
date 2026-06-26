@@ -5,9 +5,13 @@ Reuses train_classic.py for CSA parsing, then calls kishi-to-classic
 --extract-features to produce feature vectors, and finally trains the
 MLP model via mlp_eval.py.
 
+With --mcts-engine, positions are first labeled by a strong USI engine
+(MCTS/Alpha/NNUE) for higher quality training signal.
+
 Usage:
-  python tools/train_mlp.py --kifu kifu/floodgate --engine build/kishi-to-classic
-  python tools/train_mlp.py --kifu kifu/floodgate --engine build/kishi-to-classic --epochs 5 --lr 1e-3
+  python tools/train_mlp.py --kifu kifu/floodgate --engine build/Release/kishi-to-classic.exe
+  python tools/train_mlp.py --kifu kifu/floodgate --engine build/Release/kishi-to-classic.exe \\
+    --mcts-engine build/Release/kishi-to.exe --movetime 100 --mcts-workers 4
 """
 
 from __future__ import annotations
@@ -64,76 +68,122 @@ def main():
                         help="Learning rate (default: 1e-3)")
     parser.add_argument("--device", default="auto",
                         help="PyTorch device (default: auto)")
+    parser.add_argument("--mcts-engine", default="",
+                        help="Strong USI engine for labeling (e.g. kishi-to-alpha)")
+    parser.add_argument("--movetime", type=int, default=100,
+                        help="MCTS movetime in ms (default: 100)")
+    parser.add_argument("--mcts-workers", type=int, default=1,
+                        help="Parallel MCTS engine instances (default: 1)")
+    parser.add_argument("--skip-parse", action="store_true",
+                        help="Skip kifu parsing, reuse existing positions file")
+    parser.add_argument("--skip-extract", action="store_true",
+                        help="Skip feature extraction, reuse existing features file")
     args = parser.parse_args()
 
-    kifu_dir = Path(args.kifu)
-
-    indexed = load_index(kifu_dir, args.min_rate)
-    if indexed is not None:
-        csa_files = indexed
-        print(f"Using index: {len(csa_files)} pre-filtered files", file=sys.stderr)
-    else:
-        csa_files = sorted(str(f) for f in kifu_dir.rglob("*.csa"))
-        print(f"No index found, scanning {len(csa_files)} CSA files", file=sys.stderr)
-
-    if args.max_games > 0:
-        csa_files = csa_files[:args.max_games]
-
-    # Step 1: Parse CSA -> SFEN+move TSV (same as train_classic.py)
-    workers = max(1, os.cpu_count() or 1)
-    print(f"Step 1: Parsing kifu ({workers} workers)...", file=sys.stderr)
-    all_samples = []
-    games_ok = 0
-    skipped = 0
-
-    work_args = [(str(f), args.min_rate, args.skip_opening, args.sample_rate)
-                 for f in csa_files]
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        for samples in tqdm(executor.map(_parse_worker, work_args, chunksize=16),
-                            total=len(csa_files), desc="Parsing kifu",
-                            unit="file", file=sys.stderr):
-            if samples is None:
-                skipped += 1
-                continue
-            all_samples.extend(samples)
-            games_ok += 1
-
-    print(f"  Parsed {games_ok} games, {len(all_samples)} positions "
-          f"(skipped {skipped})", file=sys.stderr)
-
-    if not all_samples:
-        print("No training data. Check kifu path and filters.", file=sys.stderr)
-        return 1
-
-    random.shuffle(all_samples)
-
-    # Write intermediate SFEN+move TSV
     model_dir = Path(args.model).parent
     if str(model_dir) and model_dir != Path(""):
         model_dir.mkdir(parents=True, exist_ok=True)
     positions_file = model_dir / "mlp_positions.tsv"
     features_file = model_dir / "mlp_training.tsv"
 
-    with open(positions_file, "w", encoding="utf-8") as f:
-        for s in all_samples:
-            f.write(f"{s['sfen']}\t{s['usi_move']}\n")
-    print(f"  Wrote {len(all_samples)} positions to {positions_file}",
-          file=sys.stderr)
+    # Step 1: Parse CSA -> SFEN+move TSV
+    if not args.skip_parse:
+        kifu_dir = Path(args.kifu)
+        indexed = load_index(kifu_dir, args.min_rate)
+        if indexed is not None:
+            csa_files = indexed
+            print(f"Using index: {len(csa_files)} pre-filtered files",
+                  file=sys.stderr)
+        else:
+            csa_files = sorted(str(f) for f in kifu_dir.rglob("*.csa"))
+            print(f"No index found, scanning {len(csa_files)} CSA files",
+                  file=sys.stderr)
+
+        if args.max_games > 0:
+            csa_files = csa_files[:args.max_games]
+
+        workers = max(1, os.cpu_count() or 1)
+        print(f"Step 1: Parsing kifu ({workers} workers)...", file=sys.stderr)
+        all_samples = []
+        games_ok = 0
+        skipped = 0
+
+        work_args = [(str(f), args.min_rate, args.skip_opening, args.sample_rate)
+                     for f in csa_files]
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            for samples in tqdm(executor.map(_parse_worker, work_args,
+                                             chunksize=16),
+                                total=len(csa_files), desc="Parsing kifu",
+                                unit="file", file=sys.stderr):
+                if samples is None:
+                    skipped += 1
+                    continue
+                all_samples.extend(samples)
+                games_ok += 1
+
+        print(f"  Parsed {games_ok} games, {len(all_samples)} positions "
+              f"(skipped {skipped})", file=sys.stderr)
+
+        if not all_samples:
+            print("No training data. Check kifu path and filters.",
+                  file=sys.stderr)
+            return 1
+
+        random.shuffle(all_samples)
+
+        with open(positions_file, "w", encoding="utf-8") as f:
+            for s in all_samples:
+                f.write(f"{s['sfen']}\t{s['usi_move']}\n")
+        print(f"  Wrote {len(all_samples)} positions to {positions_file}",
+              file=sys.stderr)
+    else:
+        if not positions_file.exists():
+            print(f"Positions file {positions_file} not found", file=sys.stderr)
+            return 1
+        print(f"Step 1: Skipped (reusing {positions_file})", file=sys.stderr)
+
+    # Step 1.5: MCTS labeling (optional)
+    extract_input = positions_file
+    if args.mcts_engine:
+        labeled_file = model_dir / "mlp_positions_labeled.tsv"
+        print(f"Step 1.5: Labeling with MCTS engine ({args.mcts_engine})...",
+              file=sys.stderr)
+        tools_dir = Path(__file__).parent
+        label_cmd = [
+            sys.executable, str(tools_dir / "mcts_label.py"),
+            "--input", str(positions_file.resolve()),
+            "--output", str(labeled_file.resolve()),
+            "--engine", str(Path(args.mcts_engine).resolve()),
+            "--movetime", str(args.movetime),
+            "--workers", str(args.mcts_workers),
+        ]
+        print(f"  Running: {' '.join(label_cmd)}", file=sys.stderr)
+        result = subprocess.run(label_cmd, stderr=sys.stderr)
+        if result.returncode != 0:
+            print("MCTS labeling failed.", file=sys.stderr)
+            return 1
+        extract_input = labeled_file
 
     # Step 2: Extract features via C++ engine
-    print("Step 2: Extracting features...", file=sys.stderr)
-    engine_path = str(Path(args.engine).resolve())
-    extract_cmd = [
-        engine_path,
-        "--extract-features", str(positions_file.resolve()),
-        "--output", str(features_file.resolve()),
-        "--negatives", str(args.negatives),
-    ]
-    print(f"  Running: {' '.join(extract_cmd)}", file=sys.stderr)
-    result = subprocess.run(extract_cmd, stderr=sys.stderr)
-    if result.returncode != 0:
-        print("Feature extraction failed.", file=sys.stderr)
-        return 1
+    if not args.skip_extract:
+        print("Step 2: Extracting features...", file=sys.stderr)
+        engine_path = str(Path(args.engine).resolve())
+        extract_cmd = [
+            engine_path,
+            "--extract-features", str(extract_input.resolve()),
+            "--output", str(features_file.resolve()),
+            "--negatives", str(args.negatives),
+        ]
+        print(f"  Running: {' '.join(extract_cmd)}", file=sys.stderr)
+        result = subprocess.run(extract_cmd, stderr=sys.stderr)
+        if result.returncode != 0:
+            print("Feature extraction failed.", file=sys.stderr)
+            return 1
+    else:
+        if not features_file.exists():
+            print(f"Features file {features_file} not found", file=sys.stderr)
+            return 1
+        print(f"Step 2: Skipped (reusing {features_file})", file=sys.stderr)
 
     # Step 3: Train MLP
     print("Step 3: Training MLP...", file=sys.stderr)
