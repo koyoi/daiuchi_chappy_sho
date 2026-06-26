@@ -27,7 +27,7 @@ Floodgate CSA 棋譜 (kifu/floodgate/*.csa)
 |---------|-------------|-------------|---------|
 | Classic (αβ探索 線形) | `train_classic.py` | `linear.weights` | 98次元線形 |
 | Classic (αβ探索 MLP) | `train_mlp.py` | `mlp.weights` | MLP (98→128→64→1) |
-| NNUE (αβ探索) | `train_nnue.py` | `nnue.bin` | NNUE (2344→256→64→32→1) |
+| NNUE (αβ探索) | `train_nnue.py` | `nnue.bin` | NNUE HalfKP (2×512→1, SCReLU) |
 | MCTS (Transformer) | `train.py` | `nn_model.onnx` | Transformer (方策+価値) |
 | Alpha (改良MCTS) | `train_alpha.py` | `alpha_model.onnx` | ResNet-SE (方策+WDL価値) |
 
@@ -152,7 +152,7 @@ python tools/export_mlp.py --model mlp_model.pt --output mlp.weights
 ## 3. NNUE エンジン (`kishi-to-nnue`)
 
 NNUE (Efficiently Updatable Neural Network) 方式の評価関数を学習します。
-2344 次元の盤面特徴量（駒種×位置 + 持ち駒）から差分計算可能なネットワーク (256→64→32→1) で局面を評価します。
+HalfKP 特徴量 (170,662 次元) から差分計算可能なネットワーク (2×512→1, SCReLU) で局面を評価します。
 
 ### クイックスタート
 
@@ -160,20 +160,31 @@ NNUE (Efficiently Updatable Neural Network) 方式の評価関数を学習しま
 python tools/train_nnue.py --kifu kifu/floodgate
 ```
 
-GPU (RTX 4070 等) がある場合はバッチサイズを大きくすると高速化できます:
+GPU がある場合はバッチサイズを大きくすると高速化できます:
 
 ```sh
-python tools/train_nnue.py --kifu kifu/floodgate --batch-size 65536 --epochs 10 --lr 4e-3
+python tools/train_nnue.py --kifu kifu/floodgate --batch-size 65536 --epochs 20
 ```
 
 ### 内部の流れ
 
-1. CSA 棋譜をパースし、各局面の盤面＋持ち駒を特徴量に変換
-2. 勝敗ラベル (+1/-1) で勝率予測を学習 (BCEWithLogitsLoss)
-3. `nnue_model.pt` (PyTorch チェックポイント) に保存
-4. NNU2 バイナリ形式 (`nnue.bin`) にエクスポート
+1. CSA 棋譜をパースし、各局面の HalfKP 特徴量を抽出
+2. 結果割引ラベル (`discount = 0.5^(残り手数/30)`) で勝率予測を学習 (sigmoid cross-entropy)
+3. 序盤は確率的にランプアップ (`include_prob = min(1.0, ply/30)`) — 機械的スキップではなく確率的に間引き
+4. `nnue_model.pt` (PyTorch チェックポイント) に保存
+5. NNU5 バイナリ形式 (`nnue.bin`) にエクスポート
    - L0 重みは int16 量子化 (scale=64)、L0 バイアスは int32
-   - L1-L3 は float32
+   - 出力層は float32
+
+### ラベル設計
+
+| 要素 | 旧方式 | 現方式 |
+|------|--------|--------|
+| 勝敗ラベル | 全局面に一律 0/1 | 結果割引: 終局に近い局面ほど結果を強く反映 |
+| 序盤スキップ | 最初の 24 手を機械的に除外 | `include_prob = min(1.0, ply/30)` で確率的にランプアップ |
+| 損失関数 | sigmoid/scale=361 | sigmoid cross-entropy (rescaling 不要) |
+
+結果割引とランプアップの組み合わせにより、序盤は「採用されにくい + 採用されてもラベルが 0.5 に近い」の二重ガードで自然にダウンウェイトされる。
 
 ### オプション
 
@@ -182,15 +193,54 @@ python tools/train_nnue.py --kifu kifu/floodgate --batch-size 65536 --epochs 10 
 | `--kifu` | (必須) | CSA 棋譜のルートディレクトリ |
 | `--output` | `nnue.bin` | エンジン用バイナリ重みファイル |
 | `--model-pt` | `nnue_model.pt` | PyTorch チェックポイント |
-| `--min-rate` | 1500 | 最低レーティング |
+| `--min-rate` | 2300 | 最低レーティング |
 | `--max-games` | 0 | 最大棋譜数 (0=全部) |
-| `--skip-opening` | 10 | 序盤 N 手をスキップ |
-| `--sample-rate` | 0.3 | 局面のサンプリング率 |
-| `--epochs` | 5 | 学習エポック数 |
-| `--batch-size` | 4096 | バッチサイズ (GPU ありなら 65536 推奨) |
+| `--skip-opening` | 0 | 序盤 N 手をスキップ (ランプアップがあるため通常 0) |
+| `--sample-rate` | 1.0 | 局面のサンプリング率 |
+| `--epochs` | 20 | 学習エポック数 |
+| `--batch-size` | 65536 | バッチサイズ |
 | `--lr` | 1e-3 | 学習率 |
 | `--workers` | 0 | パース並列数 (0=自動) |
 | `--resume` | - | 既存チェックポイントから再開 |
+| `--bootstrap` | - | eval bootstrapping 用モデル |
+| `--lambda-blend` | 0.5 | bootstrap blend: lambda×engine + (1-lambda)×outcome |
+
+### MCTS 教師による自己対局学習
+
+ゲーム結果ラベルでは val_loss ≈ 0.52 がノイズフロアとなり、それ以上の評価品質は得られない。
+より強い MCTS エンジンの探索評価値を教師ラベルとすることで、局面固有の評価を学習できる。
+
+#### Step 1: 自己対局データ生成（ローカル）
+
+```sh
+python tools/nnue_self_play.py \
+  --engine build/Release/kishi-to.exe \
+  --mcts --games 3000 --movetime 200 \
+  --output selfplay_mcts.npz
+```
+
+| オプション | デフォルト | 説明 |
+| --- | --- | --- |
+| `--engine` | (必須) | 教師エンジンの実行ファイル |
+| `--mcts` | - | MCTS スコア変換 (cp/1000→勝率)。省略時は NNUE 方式 (sigmoid(cp/600)) |
+| `--games` | 1000 | 対局数 |
+| `--movetime` | 200 | 1 手あたりの思考時間 (ms) |
+| `--random-plies` | 4 | 序盤のランダム手数（開局多様性のため） |
+| `--workers` | 1 | 並列エンジン数 |
+| `--output` | `selfplay_data.npz` | 出力ファイル |
+
+所要時間の目安: 3000 局 × movetime=200ms ≈ 10 時間。
+
+#### Step 2: 学習（リモート GPU）
+
+```sh
+python tools/train_nnue.py \
+  --data selfplay_mcts.npz \
+  --epochs 20 --batch-size 8192 --lr 4e-3
+```
+
+`--data` オプションは NPZ ファイルを直接読み込む（棋譜パース不要）。
+`--kifu` と `--data` は排他。自己対局データは既にソフトラベル付きなので bootstrap は不要。
 
 ### モデルの配備
 

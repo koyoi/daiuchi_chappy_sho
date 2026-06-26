@@ -523,13 +523,13 @@ int NNUEEngine::search(Board& board, int depth, int ply, int alpha, int beta, bo
 
     // Reverse futility pruning
     if (!inCheck && depth <= 3 && ply > 0 && std::abs(alpha) < MateScore / 2 && std::abs(beta) < MateScore / 2) {
-        const int rfpMargin = depth * 200;
+        const int rfpMargin = depth * 300;
         if (staticEval - rfpMargin >= beta) return staticEval;
     }
 
     // Razoring
     if (!inCheck && depth <= 2 && ply > 0 && std::abs(alpha) < MateScore / 2 && std::abs(beta) < MateScore / 2) {
-        const int razorMargin = 300 + depth * 200;
+        const int razorMargin = 500 + depth * 300;
         if (staticEval + razorMargin <= alpha)
             return quiescence(board, qDepth_, ply, alpha, beta);
     }

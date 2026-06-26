@@ -88,11 +88,11 @@ private:
     int seMinDepth_ = 8;
     int nmpMinDepth_ = 3;
     int nmpReduction_ = 3;
-    int futilityMargin1_ = 400;
-    int futilityMargin2_ = 900;
-    int aspirationWindow_ = 50;
+    int futilityMargin1_ = 600;
+    int futilityMargin2_ = 1200;
+    int aspirationWindow_ = 200;
     int iidMinDepth_ = 5;
-    int deltaMargin_ = 1400;
+    int deltaMargin_ = 2000;
     int qDepth_ = 6;
     int qCheckDepthMin_ = 4;
 

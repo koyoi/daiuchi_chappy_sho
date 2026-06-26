@@ -24,8 +24,6 @@ constexpr int HandFeatures = 2 * HandFeaturesPerColor; // 76
 constexpr int InputDim = BoardFeatures + HandFeatures; // 170662
 
 constexpr int L0Size = 512;
-constexpr int L1Size = 32;
-constexpr int L2Size = 32;
 constexpr int WeightScale = 64;
 
 int boardFeatureIndex(int kingSquare, bool isOwnPiece, PieceType type, int pieceSquare);
@@ -70,12 +68,8 @@ private:
 
     std::vector<std::int16_t> l0Weights_; // [InputDim][L0Size] flattened
     std::int32_t l0Biases_[nnue::L0Size]{};
-    float l1Weights_[2 * nnue::L0Size][nnue::L1Size]{};
-    float l1Biases_[nnue::L1Size]{};
-    float l2Weights_[nnue::L1Size][nnue::L2Size]{};
-    float l2Biases_[nnue::L2Size]{};
-    float l3Weights_[nnue::L2Size]{};
-    float l3Bias_ = 0.0f;
+    float outWeights_[2 * nnue::L0Size]{};
+    float outBias_ = 0.0f;
     bool loaded_ = false;
 };
 

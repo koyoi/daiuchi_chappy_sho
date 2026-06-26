@@ -119,11 +119,11 @@ void nnueUsiLoop() {
             std::cout << "option name SEMinDepth type spin default 8 min 4 max 20" << std::endl;
             std::cout << "option name NMPMinDepth type spin default 3 min 1 max 10" << std::endl;
             std::cout << "option name NMPReduction type spin default 3 min 1 max 8" << std::endl;
-            std::cout << "option name FutilityMargin1 type spin default 400 min 50 max 2000" << std::endl;
-            std::cout << "option name FutilityMargin2 type spin default 900 min 100 max 3000" << std::endl;
-            std::cout << "option name AspirationWindow type spin default 50 min 10 max 500" << std::endl;
+            std::cout << "option name FutilityMargin1 type spin default 600 min 50 max 3000" << std::endl;
+            std::cout << "option name FutilityMargin2 type spin default 1200 min 100 max 5000" << std::endl;
+            std::cout << "option name AspirationWindow type spin default 200 min 10 max 1000" << std::endl;
             std::cout << "option name IIDMinDepth type spin default 5 min 2 max 10" << std::endl;
-            std::cout << "option name DeltaMargin type spin default 1400 min 200 max 5000" << std::endl;
+            std::cout << "option name DeltaMargin type spin default 2000 min 200 max 8000" << std::endl;
             std::cout << "option name QDepth type spin default 6 min 1 max 20" << std::endl;
             std::cout << "option name QCheckDepthMin type spin default 4 min 1 max 10" << std::endl;
             std::cout << "option name RootPruneWidth type spin default 15 min 1 max 100" << std::endl;
@@ -135,7 +135,7 @@ void nnueUsiLoop() {
                 if (!fileExists("nnue.bin"))
                     std::cout << "info string WARNING: nnue.bin not found -- using random weights" << std::endl;
                 else
-                    std::cout << "info string ERROR: nnue.bin format error (bad magic or truncated) -- using random weights" << std::endl;
+                    std::cout << "info string ERROR: nnue.bin format error (expected NNU5) -- using random weights" << std::endl;
             } else {
                 std::cout << "info string NNUE evaluation loaded" << std::endl;
             }

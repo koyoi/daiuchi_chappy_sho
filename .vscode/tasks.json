@@ -44,11 +44,11 @@
         },
         {
             "label": "Remote [NNUE]: Train",
-            "detail": "train_nnue.py — HalfKP+SCReLU学習 → nnue.bin",
+            "detail": "train_nnue.py — HalfKP+SCReLU学習 → nnue.bin (halflife=60, cache自動)",
             "type": "process",
             "command": "powershell",
             "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train_nnue.ps1",
-                     "--kifu", "kifu/floodgate", "--epochs", "20", "--batch-size", "65536"],
+                     "--kifu", "kifu/floodgate", "--epochs", "20", "--batch-size", "262144", "--lr", "4e-3"],
             "group": "build",
             "problemMatcher": [],
             "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
@@ -59,7 +59,7 @@
             "type": "process",
             "command": "powershell",
             "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train_nnue.ps1",
-                     "--kifu", "kifu/floodgate", "--epochs", "20", "--batch-size", "65536",
+                     "--kifu", "kifu/floodgate", "--epochs", "20", "--batch-size", "262144", "--lr", "4e-3",
                      "--bootstrap", "nnue_model.pt", "--lambda-blend", "0.5"],
             "group": "build",
             "problemMatcher": [],
@@ -72,6 +72,26 @@
             "command": "powershell",
             "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train_nnue.ps1",
                      "${input:nnueTrainArgs}"],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "Local [NNUE]: Self-Play (MCTS teacher)",
+            "detail": "nnue_self_play.py — MCTS教師による自己対局データ生成",
+            "type": "shell",
+            "command": "python tools/nnue_self_play.py --engine build/Release/kishi-to.exe --mcts --games 2000 --movetime 500 --workers 1 --output selfplay_mcts.npz",
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+        },
+        {
+            "label": "Remote [NNUE]: Train on Self-Play Data",
+            "detail": "train_nnue.py — 自己対局データで学習",
+            "type": "process",
+            "command": "powershell",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/remote_train_nnue.ps1",
+                     "--data", "selfplay_mcts.npz", "--epochs", "20", "--batch-size", "8192", "--lr", "4e-3"],
             "group": "build",
             "problemMatcher": [],
             "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
@@ -153,7 +173,7 @@
             "id": "nnueTrainArgs",
             "type": "promptString",
             "description": "train_nnue.py の引数",
-            "default": "--kifu kifu/floodgate --epochs 20 --batch-size 65536"
+            "default": "--kifu kifu/floodgate --epochs 20 --batch-size 262144 --lr 4e-3"
         },
         {
             "id": "alphaTrainArgs",

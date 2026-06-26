@@ -83,19 +83,13 @@ void NNUENetwork::initRandom() {
     for (int j = 0; j < nnue::L0Size; ++j)
         l0Biases_[j] = 0;
 
-    for (int i = 0; i < 2 * nnue::L0Size; ++i)
-        for (int j = 0; j < nnue::L1Size; ++j)
-            l1Weights_[i][j] = he(2 * nnue::L0Size);
-    std::fill(std::begin(l1Biases_), std::end(l1Biases_), 0.0f);
-
-    for (int i = 0; i < nnue::L1Size; ++i)
-        for (int j = 0; j < nnue::L2Size; ++j)
-            l2Weights_[i][j] = he(nnue::L1Size);
-    std::fill(std::begin(l2Biases_), std::end(l2Biases_), 0.0f);
-
-    for (int i = 0; i < nnue::L2Size; ++i)
-        l3Weights_[i] = he(nnue::L2Size);
-    l3Bias_ = 0.0f;
+    {
+        float scale = std::sqrt(1.0f / static_cast<float>(2 * nnue::L0Size));
+        std::normal_distribution<float> dist(0.0f, scale);
+        for (int i = 0; i < 2 * nnue::L0Size; ++i)
+            outWeights_[i] = dist(rng);
+    }
+    outBias_ = 0.0f;
     loaded_ = false;
 }
 
@@ -316,51 +310,42 @@ void NNUENetwork::updateAccumulatorIncremental(const Board& boardAfterMove, cons
 int NNUENetwork::evaluateFromAccumulator(const nnue::Accumulator& acc, Color perspective) const {
     constexpr float invScale = 1.0f / nnue::WeightScale;
 
-    alignas(32) float concat[2 * nnue::L0Size];
     const std::int32_t* own = (perspective == Black) ? acc.black : acc.white;
     const std::int32_t* opp = (perspective == Black) ? acc.white : acc.black;
+
+    float output = outBias_;
 
 #if NNUE_USE_AVX2
     const __m256 vInvScale = _mm256_set1_ps(invScale);
     const __m256 vZero = _mm256_setzero_ps();
     const __m256 vOne = _mm256_set1_ps(1.0f);
-    // SCReLU with AVX2: convert int32→float, scale, clamp(0,1), square
+    __m256 vSum = _mm256_setzero_ps();
     for (int i = 0; i < nnue::L0Size; i += 8) {
         __m256i vi = _mm256_load_si256(reinterpret_cast<const __m256i*>(own + i));
         __m256 vf = _mm256_mul_ps(_mm256_cvtepi32_ps(vi), vInvScale);
         vf = _mm256_min_ps(_mm256_max_ps(vf, vZero), vOne);
-        _mm256_store_ps(concat + i, _mm256_mul_ps(vf, vf));
+        vf = _mm256_mul_ps(vf, vf);
+        __m256 vw = _mm256_loadu_ps(outWeights_ + i);
+        vSum = _mm256_add_ps(vSum, _mm256_mul_ps(vf, vw));
     }
     for (int i = 0; i < nnue::L0Size; i += 8) {
         __m256i vi = _mm256_load_si256(reinterpret_cast<const __m256i*>(opp + i));
         __m256 vf = _mm256_mul_ps(_mm256_cvtepi32_ps(vi), vInvScale);
         vf = _mm256_min_ps(_mm256_max_ps(vf, vZero), vOne);
-        _mm256_store_ps(concat + nnue::L0Size + i, _mm256_mul_ps(vf, vf));
+        vf = _mm256_mul_ps(vf, vf);
+        __m256 vw = _mm256_loadu_ps(outWeights_ + nnue::L0Size + i);
+        vSum = _mm256_add_ps(vSum, _mm256_mul_ps(vf, vw));
     }
+    alignas(32) float tmp[8];
+    _mm256_store_ps(tmp, vSum);
+    for (int i = 0; i < 8; ++i) output += tmp[i];
 #else
     auto screlu = [](float x) { float c = std::clamp(x, 0.0f, 1.0f); return c * c; };
     for (int i = 0; i < nnue::L0Size; ++i)
-        concat[i] = screlu(static_cast<float>(own[i]) * invScale);
+        output += screlu(static_cast<float>(own[i]) * invScale) * outWeights_[i];
     for (int i = 0; i < nnue::L0Size; ++i)
-        concat[nnue::L0Size + i] = screlu(static_cast<float>(opp[i]) * invScale);
+        output += screlu(static_cast<float>(opp[i]) * invScale) * outWeights_[nnue::L0Size + i];
 #endif
-
-    float h1[nnue::L1Size];
-    for (int j = 0; j < nnue::L1Size; ++j) {
-        float sum = l1Biases_[j];
-        for (int i = 0; i < 2 * nnue::L0Size; ++i) sum += concat[i] * l1Weights_[i][j];
-        h1[j] = std::clamp(sum, 0.0f, 1.0f);
-    }
-
-    float h2[nnue::L2Size];
-    for (int j = 0; j < nnue::L2Size; ++j) {
-        float sum = l2Biases_[j];
-        for (int i = 0; i < nnue::L1Size; ++i) sum += h1[i] * l2Weights_[i][j];
-        h2[j] = std::clamp(sum, 0.0f, 1.0f);
-    }
-
-    float output = l3Bias_;
-    for (int i = 0; i < nnue::L2Size; ++i) output += h2[i] * l3Weights_[i];
 
     return static_cast<int>(output * 600.0f);
 }
@@ -378,7 +363,7 @@ bool NNUENetwork::load(const std::string& path) {
     char magic[4];
     file.read(magic, 4);
 
-    if (std::strncmp(magic, "NNU4", 4) == 0) {
+    if (std::strncmp(magic, "NNU5", 4) == 0) {
         std::int32_t storedL0Size = 0;
         file.read(reinterpret_cast<char*>(&storedL0Size), sizeof(storedL0Size));
         if (storedL0Size != nnue::L0Size) return false;
@@ -386,12 +371,8 @@ bool NNUENetwork::load(const std::string& path) {
         l0Weights_.resize(l0WeightSize);
         file.read(reinterpret_cast<char*>(l0Weights_.data()), l0WeightSize * sizeof(std::int16_t));
         file.read(reinterpret_cast<char*>(l0Biases_), sizeof(l0Biases_));
-        file.read(reinterpret_cast<char*>(l1Weights_), sizeof(l1Weights_));
-        file.read(reinterpret_cast<char*>(l1Biases_), sizeof(l1Biases_));
-        file.read(reinterpret_cast<char*>(l2Weights_), sizeof(l2Weights_));
-        file.read(reinterpret_cast<char*>(l2Biases_), sizeof(l2Biases_));
-        file.read(reinterpret_cast<char*>(l3Weights_), sizeof(l3Weights_));
-        file.read(reinterpret_cast<char*>(&l3Bias_), sizeof(l3Bias_));
+        file.read(reinterpret_cast<char*>(outWeights_), sizeof(outWeights_));
+        file.read(reinterpret_cast<char*>(&outBias_), sizeof(outBias_));
         if (!file) return false;
         loaded_ = true;
         return true;
@@ -404,18 +385,14 @@ bool NNUENetwork::save(const std::string& path) const {
     std::ofstream file(path, std::ios::binary);
     if (!file) return false;
 
-    file.write("NNU4", 4);
+    file.write("NNU5", 4);
     const std::int32_t storedL0Size = nnue::L0Size;
     file.write(reinterpret_cast<const char*>(&storedL0Size), sizeof(storedL0Size));
     const std::size_t l0WeightSize = static_cast<std::size_t>(nnue::InputDim) * nnue::L0Size;
     file.write(reinterpret_cast<const char*>(l0Weights_.data()), l0WeightSize * sizeof(std::int16_t));
     file.write(reinterpret_cast<const char*>(l0Biases_), sizeof(l0Biases_));
-    file.write(reinterpret_cast<const char*>(l1Weights_), sizeof(l1Weights_));
-    file.write(reinterpret_cast<const char*>(l1Biases_), sizeof(l1Biases_));
-    file.write(reinterpret_cast<const char*>(l2Weights_), sizeof(l2Weights_));
-    file.write(reinterpret_cast<const char*>(l2Biases_), sizeof(l2Biases_));
-    file.write(reinterpret_cast<const char*>(l3Weights_), sizeof(l3Weights_));
-    file.write(reinterpret_cast<const char*>(&l3Bias_), sizeof(l3Bias_));
+    file.write(reinterpret_cast<const char*>(outWeights_), sizeof(outWeights_));
+    file.write(reinterpret_cast<const char*>(&outBias_), sizeof(outBias_));
 
     return file.good();
 }
