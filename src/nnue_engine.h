@@ -13,6 +13,7 @@
 #include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace shogi {
@@ -38,6 +39,9 @@ public:
     const std::string& nnuePath() const { return nnuePath_; }
     SearchInfo lastSearchInfo() const;
     MateResult searchMate(const Board& board, int timeLimitMs = 500);
+
+    void stop() { stopped_.store(true); }
+    void prepareSearch() { stopped_.store(false); }
 
     void setParam(const std::string& name, int value);
     int getParam(const std::string& name) const;

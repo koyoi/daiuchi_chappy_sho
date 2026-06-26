@@ -12,6 +12,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace shogi {
@@ -30,6 +31,8 @@ SearchLimits parseSearchLimits(const std::vector<std::string>& words, Color side
     limits.byoyomiMs = valueAfter(words, "byoyomi", 0);
     limits.incrementMs = valueAfter(words, side == Black ? "binc" : "winc", 0);
     limits.remainingMs = valueAfter(words, side == Black ? "btime" : "wtime", 0);
+    limits.infinite = std::find(words.begin(), words.end(), "infinite") != words.end()
+                   || std::find(words.begin(), words.end(), "ponder") != words.end();
     return limits;
 }
 
@@ -90,6 +93,13 @@ void nnueUsiLoop() {
     Board board = startpos();
     auto enginePtr = std::make_unique<NNUEEngine>();
     NNUEEngine& engine = *enginePtr;
+    std::thread searchThread;
+
+    auto joinSearch = [&]() {
+        if (searchThread.joinable()) searchThread.join();
+    };
+
+    bool quitRequested = false;
     std::string line;
     while (std::getline(std::cin, line)) {
         line = trim(line);
@@ -120,6 +130,7 @@ void nnueUsiLoop() {
             std::cout << "option name ReuseCache type check default true" << std::endl;
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
+            joinSearch();
             if (!engine.loadNNUE("nnue.bin")) {
                 if (!fileExists("nnue.bin"))
                     std::cout << "info string WARNING: nnue.bin not found -- using random weights" << std::endl;
@@ -132,13 +143,17 @@ void nnueUsiLoop() {
                 std::cout << "info string Opening book loaded" << std::endl;
             std::cout << "readyok" << std::endl;
         } else if (command == "setoption") {
+            joinSearch();
             handleSetOption(engine, words);
         } else if (command == "usinewgame") {
+            joinSearch();
             board = startpos();
         } else if (command == "position") {
+            joinSearch();
             Board next;
             if (setPosition(next, words)) board = next;
         } else if (command == "go") {
+            joinSearch();
             const bool isMateSearch = std::find(words.begin(), words.end(), "mate") != words.end();
             if (isMateSearch) {
                 int mateMoveTime = 10000;
@@ -161,32 +176,48 @@ void nnueUsiLoop() {
                     std::cout << "checkmate notimplemented" << std::endl;
                 }
             } else {
-                int lastInfoDepth = -1;
-                auto lastInfoTime = std::chrono::steady_clock::now();
-                const Move move = engine.chooseMove(board, parseSearchLimits(words, board.side),
-                    [&lastInfoDepth, &lastInfoTime](const SearchInfo& info) {
-                        auto now = std::chrono::steady_clock::now();
-                        if (info.depth != lastInfoDepth ||
-                            std::chrono::duration_cast<std::chrono::milliseconds>(now - lastInfoTime).count() >= 333) {
-                            printSearchInfo(info);
-                            lastInfoDepth = info.depth;
-                            lastInfoTime = now;
-                        }
-                    });
-                if (move.to < 0) {
-                    std::cout << "bestmove resign" << std::endl;
-                } else {
-                    printSearchInfo(engine.lastSearchInfo());
-                    std::cout << "bestmove " << toUsi(move) << std::endl;
-                }
+                const SearchLimits limits = parseSearchLimits(words, board.side);
+                const Board searchBoard = board;
+                engine.prepareSearch();
+                searchThread = std::thread([&engine, searchBoard, limits]() {
+                    int lastInfoDepth = -1;
+                    auto lastInfoTime = std::chrono::steady_clock::now();
+                    const Move move = engine.chooseMove(searchBoard, limits,
+                        [&lastInfoDepth, &lastInfoTime](const SearchInfo& info) {
+                            auto now = std::chrono::steady_clock::now();
+                            if (info.depth != lastInfoDepth ||
+                                std::chrono::duration_cast<std::chrono::milliseconds>(now - lastInfoTime).count() >= 333) {
+                                printSearchInfo(info);
+                                lastInfoDepth = info.depth;
+                                lastInfoTime = now;
+                            }
+                        });
+                    if (move.to < 0) {
+                        std::cout << "bestmove resign" << std::endl;
+                    } else {
+                        printSearchInfo(engine.lastSearchInfo());
+                        std::cout << "bestmove " << toUsi(move) << std::endl;
+                    }
+                });
             }
         } else if (command == "stop") {
-            // synchronous
-        } else if (command == "gameover" || command == "usinewgame") {
+            engine.stop();
+            joinSearch();
+        } else if (command == "ponderhit") {
+            engine.stop();
+            joinSearch();
+        } else if (command == "gameover") {
+            joinSearch();
             board = startpos();
         } else if (command == "quit") {
+            engine.stop();
+            joinSearch();
+            quitRequested = true;
             break;
         }
+    }
+    if (!quitRequested) {
+        joinSearch();
     }
 }
 

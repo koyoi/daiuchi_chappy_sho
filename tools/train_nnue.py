@@ -72,7 +72,7 @@ L0_SIZE = 512
 L1_SIZE = 32
 L2_SIZE = 32
 WEIGHT_SCALE = 64
-EVAL_SCALE = 361.0  # sigmoid scaling factor (Stockfish convention)
+EVAL_SCALE = 1.0  # model output is logit of win probability; no rescaling needed
 
 # C++ piece type mapping
 PT_PAWN = 1; PT_LANCE = 2; PT_KNIGHT = 3; PT_SILVER = 4
@@ -419,9 +419,8 @@ class NNUEModel(nn.Module):
         return self.l3(h2).squeeze(1)
 
 
-def sigmoid_loss(pred, target, scale=EVAL_SCALE):
-    scaled = pred / scale
-    return F.binary_cross_entropy_with_logits(scaled, target, reduction='mean')
+def sigmoid_loss(pred, target):
+    return F.binary_cross_entropy_with_logits(pred, target, reduction='mean')
 
 
 def bootstrap_labels(model, dataset, device, lambda_blend=0.5, batch_size=8192):
@@ -436,7 +435,7 @@ def bootstrap_labels(model, dataset, device, lambda_blend=0.5, batch_size=8192):
             w_idx, w_off = w_idx.to(device), w_off.to(device)
             side_d = side.to(device)
             raw_pred = model(b_idx, b_off, w_idx, w_off, side_d)
-            engine_prob = torch.sigmoid(raw_pred / EVAL_SCALE)
+            engine_prob = torch.sigmoid(raw_pred)
             game_prob = (target + 1.0) / 2.0
             blended = lambda_blend * engine_prob.cpu() + (1.0 - lambda_blend) * game_prob
             soft_labels.append(blended)
@@ -582,7 +581,7 @@ def main():
                             collate_fn=collate_embag, persistent_workers=dl_workers > 0)
 
     if use_sigmoid:
-        print(f"Loss: sigmoid cross-entropy (scale={EVAL_SCALE})")
+        print("Loss: sigmoid cross-entropy (no rescaling)")
     else:
         print("Loss: MSE + tanh (legacy)")
     loss_fn_mse = nn.MSELoss()

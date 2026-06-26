@@ -13,6 +13,7 @@ struct SearchLimits {
     int remainingMs = -1;
     int incrementMs = 0;
     int byoyomiMs = 0;
+    bool infinite = false;
 };
 
 struct SearchInfo {
