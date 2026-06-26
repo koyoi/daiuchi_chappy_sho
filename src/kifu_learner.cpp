@@ -188,6 +188,9 @@ int learnFromKifu(const KifuLearnConfig& config) {
 
 int extractFeatures(const ExtractFeaturesConfig& config) {
     Evaluator evaluator;
+    if (evaluator.load("linear.weights")) {
+        std::cerr << "Loaded weights for eval bootstrap" << std::endl;
+    }
     evaluator.setHeavyFeatures(false);
 
     auto samples = loadTrainingFile(config.trainingFile);
@@ -198,6 +201,9 @@ int extractFeatures(const ExtractFeaturesConfig& config) {
         std::cerr << "Cannot open output file: " << config.outputFile << std::endl;
         return 1;
     }
+
+    constexpr double evalLambda = 0.6;
+    constexpr double evalScale = 361.0;
 
     std::mt19937 rng{std::random_device{}()};
     int written = 0;
@@ -221,18 +227,20 @@ int extractFeatures(const ExtractFeaturesConfig& config) {
 
         Color perspective = board.side;
 
-        // positive: features after applying the correct move
         Board after = board;
         applyMove(after, move);
         FeatureVector posFeatures = evaluator.extractFeatures(after, perspective);
-        out << "1.0";
+
+        double eval = static_cast<double>(evaluator.evaluate(after, perspective));
+        double evalWp = 1.0 / (1.0 + std::exp(-eval / evalScale));
+        double posLabel = std::clamp(evalLambda * evalWp + (1.0 - evalLambda) * 0.85, 0.01, 0.99);
+        out << posLabel;
         for (int i = 0; i < FeatureCount; ++i) {
             out << '\t' << posFeatures[i];
         }
         out << '\n';
         ++written;
 
-        // negatives: features after applying random other legal moves
         auto legal = generateLegalMoves(board, true);
         std::vector<Move> others;
         for (const Move& m : legal) {
@@ -245,7 +253,10 @@ int extractFeatures(const ExtractFeaturesConfig& config) {
                 Board neg = board;
                 applyMove(neg, others[n]);
                 FeatureVector negFeatures = evaluator.extractFeatures(neg, perspective);
-                out << "-1.0";
+                double negEval = static_cast<double>(evaluator.evaluate(neg, perspective));
+                double negWp = 1.0 / (1.0 + std::exp(-negEval / evalScale));
+                double negLabel = std::clamp(evalLambda * negWp + (1.0 - evalLambda) * 0.15, 0.01, 0.99);
+                out << negLabel;
                 for (int i = 0; i < FeatureCount; ++i) {
                     out << '\t' << negFeatures[i];
                 }

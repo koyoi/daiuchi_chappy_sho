@@ -46,18 +46,18 @@ def main():
                         help="PyTorch model path (default: mlp_model.pt)")
     parser.add_argument("--output", default="mlp.weights",
                         help="Engine weights output (default: mlp.weights)")
-    parser.add_argument("--min-rate", type=int, default=1500,
-                        help="Minimum player rating (default: 1500)")
+    parser.add_argument("--min-rate", type=int, default=2000,
+                        help="Minimum player rating (default: 2000)")
     parser.add_argument("--max-games", type=int, default=0,
                         help="Max games to process (0=all)")
     parser.add_argument("--skip-opening", type=int, default=10,
                         help="Skip first N moves (default: 10)")
-    parser.add_argument("--sample-rate", type=float, default=0.5,
-                        help="Position sampling rate (default: 0.5)")
+    parser.add_argument("--sample-rate", type=float, default=0.3,
+                        help="Position sampling rate (default: 0.3)")
     parser.add_argument("--negatives", type=int, default=1,
                         help="Negative samples per position (default: 1)")
-    parser.add_argument("--epochs", type=int, default=5,
-                        help="Training epochs (default: 5)")
+    parser.add_argument("--epochs", type=int, default=10,
+                        help="Training epochs (default: 10)")
     parser.add_argument("--batch-size", type=int, default=512,
                         help="Training batch size (default: 512)")
     parser.add_argument("--lr", type=float, default=1e-3,
