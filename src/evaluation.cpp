@@ -1048,7 +1048,7 @@ int Evaluator::evaluateMlp(const FeatureVector& features) const {
         for (int i = 0; i < FeatureCount; ++i) {
             sum += w1_[j][i] * features[i];
         }
-        h1[j] = sum > 0.0 ? sum : 0.0;
+        h1[j] = sum > 0.0 ? sum : sum * 0.01;
     }
     double h2[MlpHidden2];
     for (int j = 0; j < MlpHidden2; ++j) {
@@ -1056,13 +1056,15 @@ int Evaluator::evaluateMlp(const FeatureVector& features) const {
         for (int i = 0; i < MlpHidden1; ++i) {
             sum += w2_[j][i] * h1[i];
         }
-        h2[j] = sum > 0.0 ? sum : 0.0;
+        h2[j] = sum > 0.0 ? sum : sum * 0.01;
     }
-    double out = b3_;
+    double logit = b3_;
     for (int i = 0; i < MlpHidden2; ++i) {
-        out += w3_[i] * h2[i];
+        logit += w3_[i] * h2[i];
     }
-    return static_cast<int>(std::clamp(out * 1000.0, -30000.0, 30000.0));
+    // BCEWithLogitsLoss outputs logits; convert to win probability then centipawns
+    double wp = 1.0 / (1.0 + std::exp(-std::clamp(logit, -15.0, 15.0)));
+    return static_cast<int>(std::clamp((wp - 0.5) * 2000.0, -30000.0, 30000.0));
 }
 
 bool Evaluator::loadMlp(const std::string& path) {

@@ -3,6 +3,8 @@
 #include "movegen.h"
 #include "position.h"
 
+#include <algorithm>
+#include <cmath>
 #include <fstream>
 
 namespace shogi {
@@ -96,6 +98,9 @@ void OnlineLearner::finishGame(int engineResult, Color engineSide) {
     }
 
     const Color winner = engineResult > 0 ? engineSide : opposite(engineSide);
+    constexpr double evalLambda = 0.6;
+    constexpr double evalScale = 361.0;
+
     for (std::size_t i = 0; i < game_.size(); ++i) {
         const RecordedPly& ply = game_[i];
         Board after = ply.before;
@@ -112,9 +117,15 @@ void OnlineLearner::finishGame(int engineResult, Color engineSide) {
             const double recencyScale = 0.35 + 1.65 * progress;
             evaluator_.applyDelta(delta, learningRate_ * actorScale * recencyScale * outcomeForMover);
         }
+
         const double confidence = 0.55 + 0.40 * progress;
-        const double smoothLabel = outcomeForMover > 0 ? confidence : (1.0 - confidence);
-        appendTrainingSample(smoothLabel, chosen);
+        const double smoothResult = outcomeForMover > 0 ? confidence : (1.0 - confidence);
+
+        double eval = evaluator_.evaluate(after, ply.mover);
+        double evalWp = 1.0 / (1.0 + std::exp(-eval / evalScale));
+        double label = evalLambda * evalWp + (1.0 - evalLambda) * smoothResult;
+        label = std::clamp(label, 0.01, 0.99);
+        appendTrainingSample(label, chosen);
     }
 
     if (!recordOnly_) {

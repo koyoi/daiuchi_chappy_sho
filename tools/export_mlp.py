@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Export a PyTorch MLP model (mlp_model.pt) to a text weights file (mlp.weights).
 
+Fuses the leading BatchNorm into the first Linear layer so the C++ side
+only needs plain Linear+LeakyReLU layers.
+
 Format:
   Line 1: input_dim hidden1_dim hidden2_dim
   Then: W1 (hidden1 * input rows), b1 (hidden1 values),
@@ -30,12 +33,38 @@ def main():
 
     state = torch.load(args.model, map_location="cpu", weights_only=True)
 
-    w1 = state["0.weight"]  # [64, 74]
-    b1 = state["0.bias"]    # [64]
-    w2 = state["2.weight"]  # [32, 64]
-    b2 = state["2.bias"]    # [32]
-    w3 = state["4.weight"]  # [1, 32]
-    b3 = state["4.bias"]    # [1]
+    # Detect model format: new (with BatchNorm at index 0) or legacy
+    has_batchnorm = "0.weight" in state and "0.running_mean" in state
+
+    if has_batchnorm:
+        # New model: BN(0) -> Linear(1) -> LeakyReLU(2) -> Dropout(3) ->
+        #            Linear(4) -> LeakyReLU(5) -> Dropout(6) -> Linear(7)
+        bn_weight = state["0.weight"]
+        bn_bias = state["0.bias"]
+        bn_mean = state["0.running_mean"]
+        bn_var = state["0.running_var"]
+        bn_eps = 1e-5
+
+        raw_w1 = state["1.weight"]
+        raw_b1 = state["1.bias"]
+
+        scale = bn_weight / torch.sqrt(bn_var + bn_eps)
+        shift = bn_bias - bn_mean * scale
+        w1 = raw_w1 * scale.unsqueeze(0)
+        b1 = raw_b1 + raw_w1 @ shift
+
+        w2 = state["4.weight"]
+        b2 = state["4.bias"]
+        w3 = state["7.weight"]
+        b3 = state["7.bias"]
+    else:
+        # Legacy model: Linear(0) -> ReLU(1) -> Linear(2) -> ReLU(3) -> Linear(4)
+        w1 = state["0.weight"]
+        b1 = state["0.bias"]
+        w2 = state["2.weight"]
+        b2 = state["2.bias"]
+        w3 = state["4.weight"]
+        b3 = state["4.bias"]
 
     input_dim = w1.shape[1]
     hidden1 = w1.shape[0]
@@ -55,6 +84,8 @@ def main():
 
     print(f"Exported {args.model} -> {args.output}")
     print(f"  Architecture: {input_dim} -> {hidden1} -> {hidden2} -> 1")
+    if has_batchnorm:
+        print(f"  BatchNorm fused into first Linear layer")
     return 0
 
 
