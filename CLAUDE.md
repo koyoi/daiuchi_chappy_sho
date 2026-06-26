@@ -43,7 +43,7 @@ Entry point (`main.cpp`) selects protocol → `usiLoop()` or `csaLoop()` → `Le
 - **shogi_types** — `Board`, `Move`, `Bitboard` (81-bit: `uint64_t lo` + `uint32_t hi`), `Color`, `PieceType`. Board holds piece array, hand pieces, Zobrist hash (XOR-incremental), king position cache, material score (incremental), and per-color/per-piece-type Bitboards.
 - **position** — `applyMove()` updates all Board state atomically (squares, Bitboards, hash, material, king positions). `startpos()` / `setFromSfen()` initialize from SFEN.
 - **movegen** — Bitboard-based move generation. Pre-computed step-attack tables for short-range pieces; slide functions for lance/bishop/rook. `attackersOf()` returns Bitboard of all attackers of a square. `generateLegalMoves()` filters pseudo-legal moves by checking king safety and pawn-drop mate.
-- **evaluation** — `Evaluator` extracts 98 features and computes score as `dot(features, weights)` (linear) or MLP forward pass (98→128→64→1 with ReLU). MLP weights loaded from text file via `loadMlp()`. `buildAttackMap()` uses Bitboard-based `countAttackers()`. Optional heavy features (index 36-39,41) require full legal move generation per side. Feature 40 (attacked king ring) is always computed. Feature groups:
+- **evaluation** — `Evaluator` extracts 100 features and computes score as `dot(features, weights)` (linear) or MLP forward pass (100→256→128→1 with LeakyReLU). MLP trained with BCEWithLogitsLoss; C++ inference applies sigmoid to convert logit→win probability→centipawns. BatchNorm (fused into first Linear at export) normalizes feature scales. MLP weights loaded from text file via `loadMlp()`. `buildAttackMap()` uses Bitboard-based `countAttackers()`. Optional heavy features (index 36-39,41) require full legal move generation per side. Feature 40 (attacked king ring) is always computed. Feature groups:
   - 0-20: Piece counts, PST, hand pieces, king proximity, gold-like king defenders, near-king piece pressure
   - 21-27: King distance, side to move, game phase (opening/middle/endgame), hand piece totals, promoted piece count
   - 28-31: Threat values (attacked/hanging/loose/defended), /100 normalized
@@ -67,7 +67,7 @@ Entry point (`main.cpp`) selects protocol → `usiLoop()` or `csaLoop()` → `Le
 - **opening_book** — `OpeningBook` loads a text-based opening book (`book.txt`) mapping position hashes to weighted candidate moves. `chooseMove()` probes the book before search when `moveNumber <= 8`. Book file uses USI `position` command syntax; `gen_book.py` generates it via deep engine search.
 - **engine** — `LearningEngine::chooseMove()` first checks the opening book, then runs iterative deepening. `search()` is alpha-beta with transposition table (fixed-size 2^20 array, 64-stripe lock sharding, generation counter). `quiescence()` extends search for tactical moves. Root moves scored in parallel via thread pool, reordered after each depth iteration. Late Move Reduction: moves ranked below `rootPruneWidth_` at depth≥3 searched at reduced depth. Move ordering: MVV-LVA captures > checks > promotions > drops. Before normal search, runs a quick mate search (up to 7 plies, 10% of time budget). When the main search detects a mate score, reports `score mate N` via USI.
 - **mate_solver** — `MateSolver` provides dedicated tsumi (checkmate) search and tsumero (threatmate) detection. `searchMate()` uses iterative deepening with check-only move generation for the attacker and evasion-only for the defender. Dedicated 256K-entry TT stores proven/disproven status per position. `detectTsumero()` uses the null-move approach: if the defender skips their turn, is there tsumi? USI `go mate [time]` command invokes the solver directly.
-- **learning** — `OnlineLearner` records moves during a game. On `finishGame()`, updates weights by comparing chosen-move features against average-of-legal-moves features, scaled by win/loss outcome, actor type (engine vs human), and recency.
+- **learning** — `OnlineLearner` records moves during a game. On `finishGame()`, updates weights by comparing chosen-move features against average-of-legal-moves features, scaled by win/loss outcome, actor type (engine vs human), and recency. MLP training labels use eval bootstrap: `label = 0.6 * sigmoid(eval/361) + 0.4 * smoothResult`, clamped to [0.01, 0.99].
 
 ### Alpha Engine (ResNet-SE + Improved MCTS)
 
@@ -119,16 +119,17 @@ NNUE engine: Bucket-based TT with 4 entries per bucket. Default 256 MB (configur
 | `src/engine.cpp` | Search (alpha-beta, quiescence, mate detection), move ordering, root LMR |
 | `src/mate_solver.h/cpp` | Tsumi (checkmate) search and tsumero (threatmate) detection |
 | `src/opening_book.h/cpp` | Opening book loader and weighted random move selection |
-| `src/evaluation.cpp` | 98-feature extraction, linear/MLP evaluation, PST, king shelter |
+| `src/evaluation.cpp` | 100-feature extraction, linear/MLP(256→128, LeakyReLU, sigmoid) evaluation, PST, king shelter |
 | `src/position.cpp` | applyMove, SFEN parsing, board initialization |
-| `src/learning.cpp` | Online weight learning from game outcomes |
+| `src/learning.cpp` | Online weight learning from game outcomes with eval bootstrap labels |
 | `src/usi_protocol.cpp` | USI command loop and option handling |
 | `src/csa_protocol.cpp` | CSA protocol loop |
 | `src/nn_bridge.h/cpp` | NN inference bridge (Python subprocess or ONNX Runtime) for MCTS engine |
 | `src/onnx_inference.cpp` | Native ONNX Runtime inference (compiled with `HAS_ONNXRUNTIME`) |
 | `src/mcts_usi_protocol.cpp` | USI protocol loop for MCTS engine |
-| `tools/mlp_eval.py` | PyTorch MLP model training (Classic engine) |
-| `tools/export_mlp.py` | PyTorch MLP → text weights converter |
+| `tools/mlp_eval.py` | PyTorch MLP model training (BatchNorm+LeakyReLU+Dropout, BCEWithLogitsLoss) |
+| `tools/export_mlp.py` | PyTorch MLP → text weights converter (BatchNorm fusion) |
+| `tools/train_mlp.py` | MLP training pipeline (kifu parse → feature extract → train → export) |
 | `tools/export_onnx.py` | PyTorch Transformer → ONNX model converter |
 | `tools/train.py` | Transformer model training (MCTS engine) |
 | `tools/nn_eval.py` | Python-side NN evaluation server for MCTS engine |
