@@ -101,9 +101,12 @@ class USIEngine:
                 self.proc.kill()
 
     def _send(self, cmd: str):
-        if self.proc and self.proc.stdin:
-            self.proc.stdin.write(cmd + "\n")
-            self.proc.stdin.flush()
+        if self.proc and self.proc.stdin and self.proc.poll() is None:
+            try:
+                self.proc.stdin.write(cmd + "\n")
+                self.proc.stdin.flush()
+            except OSError:
+                pass
 
     def _recv(self) -> Optional[str]:
         if not self.proc or not self.proc.stdout:

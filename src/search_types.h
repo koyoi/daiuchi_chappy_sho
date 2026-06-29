@@ -26,6 +26,12 @@ struct SearchInfo {
     std::vector<Move> pv;
     bool isMate = false;
     int mateInMoves = 0;
+    int multipv = 0;
+};
+
+struct RootMoveScore {
+    Move move{};
+    int score = 0;
 };
 
 using InfoCallback = std::function<void(const SearchInfo&)>;

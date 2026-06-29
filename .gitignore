@@ -16,3 +16,8 @@ uv.lock
 __pycache__/
 /kifu/
 *.npz
+*.bin
+*.onnx
+*_labeled.tsv
+cross_train_test/
+cross_train_work/

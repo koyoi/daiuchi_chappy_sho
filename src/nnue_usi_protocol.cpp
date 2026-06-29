@@ -40,6 +40,7 @@ void printSearchInfo(const SearchInfo& info) {
     if (!info.hasBestMove) return;
     const std::uint64_t nps = info.timeMs > 0 ? info.nodes * 1000ull / static_cast<std::uint64_t>(info.timeMs) : info.nodes;
     std::cout << "info depth " << info.depth;
+    if (info.multipv > 0) std::cout << " multipv " << info.multipv;
     if (info.isMate) std::cout << " score mate " << info.mateInMoves;
     else std::cout << " score cp " << info.scoreCp;
     std::cout << " nodes " << info.nodes << " nps " << nps << " time " << info.timeMs << " pv";
@@ -78,6 +79,8 @@ void handleSetOption(NNUEEngine& engine, const std::vector<std::string>& words) 
             else
                 std::cout << "info string ERROR: " << value << " format error (bad magic or truncated)" << std::endl;
         }
+    } else if (name == "MultiPV") {
+        try { engine.setMultiPV(std::stoi(value)); } catch (...) {}
     } else if (name == "ReuseCache") {
         engine.setReuseCache(value != "false" && value != "0");
     } else if (name == "Hash") {
@@ -113,6 +116,7 @@ void nnueUsiLoop() {
             std::cout << "option name MaxMoveTimeMs type spin default 1000 min 50 max 600000" << std::endl;
             std::cout << "option name Threads type spin default " << engine.threadCount() << " min 1 max 256" << std::endl;
             std::cout << "option name NNUEFile type string default nnue.bin" << std::endl;
+            std::cout << "option name MultiPV type spin default 1 min 1 max 500" << std::endl;
             std::cout << "option name Book type check default true" << std::endl;
             std::cout << "option name WarnOnNoWeights type check default true" << std::endl;
             std::cout << "option name Hash type spin default 256 min 1 max 65536" << std::endl;
@@ -179,13 +183,15 @@ void nnueUsiLoop() {
                 const SearchLimits limits = parseSearchLimits(words, board.side);
                 const Board searchBoard = board;
                 engine.prepareSearch();
-                searchThread = std::thread([&engine, searchBoard, limits]() {
+                const int multiPV = engine.multiPV();
+                searchThread = std::thread([&engine, searchBoard, limits, multiPV]() {
                     int lastInfoDepth = -1;
                     auto lastInfoTime = std::chrono::steady_clock::now();
                     const Move move = engine.chooseMove(searchBoard, limits,
-                        [&lastInfoDepth, &lastInfoTime](const SearchInfo& info) {
+                        [&lastInfoDepth, &lastInfoTime, multiPV](const SearchInfo& info) {
                             auto now = std::chrono::steady_clock::now();
-                            if (info.depth != lastInfoDepth ||
+                            const bool isMultiPV = multiPV > 1 && info.multipv > 0;
+                            if (isMultiPV || info.depth != lastInfoDepth ||
                                 std::chrono::duration_cast<std::chrono::milliseconds>(now - lastInfoTime).count() >= 333) {
                                 printSearchInfo(info);
                                 lastInfoDepth = info.depth;
@@ -206,6 +212,18 @@ void nnueUsiLoop() {
         } else if (command == "ponderhit") {
             engine.stop();
             joinSearch();
+        } else if (command == "getscores") {
+            joinSearch();
+            const auto& rootScores = engine.lastRootScores();
+            if (rootScores.empty()) {
+                std::cout << "scores none" << std::endl;
+            } else {
+                std::cout << "scores";
+                for (const auto& rs : rootScores) {
+                    std::cout << " " << toUsi(rs.move) << ":" << rs.score;
+                }
+                std::cout << std::endl;
+            }
         } else if (command == "gameover") {
             joinSearch();
             board = startpos();

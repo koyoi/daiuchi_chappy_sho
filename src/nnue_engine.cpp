@@ -320,6 +320,7 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
         std::vector<int> scores(legal.size(), std::numeric_limits<int>::min());
         {
             int runningAlpha = aspirationAlpha;
+            std::vector<int> topNScores;
             for (int i = 0; i < static_cast<int>(legal.size()); ++i) {
                 if (shouldStop()) break;
                 emitPeriodicInfo();
@@ -331,7 +332,13 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
                 if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) sd = std::max(0, depth - 3);
                 int val = -search(next, sd, 1, -aspirationBeta, -runningAlpha, true, legal[i]);
                 scores[i] = val;
-                runningAlpha = std::max(runningAlpha, val);
+                topNScores.insert(
+                    std::upper_bound(topNScores.begin(), topNScores.end(), val, std::greater<int>()),
+                    val);
+                if (static_cast<int>(topNScores.size()) > multiPV_)
+                    topNScores.resize(multiPV_);
+                if (static_cast<int>(topNScores.size()) >= multiPV_)
+                    runningAlpha = std::max(aspirationAlpha, topNScores.back());
             }
         }
 
@@ -342,6 +349,7 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
             }
             if (depthBest != std::numeric_limits<int>::min() && (depthBest <= aspirationAlpha || depthBest >= aspirationBeta)) {
                 int runningAlpha = -MateScore;
+                std::vector<int> topNScores2;
                 for (int i = 0; i < static_cast<int>(legal.size()) && !shouldStop(); ++i) {
                     emitPeriodicInfo();
                     auto delta = nnue_.computeMoveDelta(board, legal[i]);
@@ -352,87 +360,105 @@ Move NNUEEngine::chooseMove(const Board& board, const SearchLimits& limits, cons
                     if (pruneWidth > 0 && depth >= 3 && i >= pruneWidth) sd = std::max(0, depth - 3);
                     int val = -search(next, sd, 1, -MateScore, -runningAlpha, true, legal[i]);
                     scores[i] = val;
-                    runningAlpha = std::max(runningAlpha, val);
+                    topNScores2.insert(
+                        std::upper_bound(topNScores2.begin(), topNScores2.end(), val, std::greater<int>()),
+                        val);
+                    if (static_cast<int>(topNScores2.size()) > multiPV_)
+                        topNScores2.resize(multiPV_);
+                    if (static_cast<int>(topNScores2.size()) >= multiPV_)
+                        runningAlpha = std::max(-MateScore, topNScores2.back());
                 }
             }
         }
 
         if (shouldStop()) break;
 
-        int depthBestScore = std::numeric_limits<int>::min();
-        std::vector<Move> depthBestMoves;
-        for (int i = 0; i < static_cast<int>(legal.size()); ++i) {
-            if (scores[i] == std::numeric_limits<int>::min()) continue;
-            if (scores[i] > depthBestScore) {
-                depthBestScore = scores[i];
-                depthBestMoves.clear();
-                depthBestMoves.push_back(legal[i]);
-            } else if (scores[i] == depthBestScore) {
-                depthBestMoves.push_back(legal[i]);
-            }
-        }
-        if (!depthBestMoves.empty()) {
-            completedDepth = depth;
-            bestScore = depthBestScore;
-            bestMoves = depthBestMoves;
+        struct IndexedScore { int index; int score; };
+        std::vector<IndexedScore> ranked(legal.size());
+        for (int i = 0; i < static_cast<int>(legal.size()); ++i) ranked[i] = {i, scores[i]};
+        std::stable_sort(ranked.begin(), ranked.end(), [](const IndexedScore& a, const IndexedScore& b) { return a.score > b.score; });
 
+        int depthBestScore = ranked.empty() ? std::numeric_limits<int>::min() : ranked[0].score;
+        if (depthBestScore == std::numeric_limits<int>::min()) continue;
+
+        std::vector<Move> depthBestMoves;
+        for (const auto& r : ranked) {
+            if (r.score == depthBestScore) depthBestMoves.push_back(legal[r.index]);
+            else break;
+        }
+
+        completedDepth = depth;
+        bestScore = depthBestScore;
+        bestMoves = depthBestMoves;
+
+        lastRootScores_.clear();
+        for (const auto& r : ranked) {
+            if (r.score == std::numeric_limits<int>::min()) break;
+            lastRootScores_.push_back({legal[r.index], r.score});
+        }
+
+        const int pvCount = std::min(multiPV_, static_cast<int>(lastRootScores_.size()));
+        const auto now = std::chrono::steady_clock::now();
+        const int elapsedMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - searchStart).count());
+        const std::uint64_t curNodes = nodes_.load();
+
+        for (int pv = 0; pv < pvCount; ++pv) {
             SearchInfo info;
             info.depth = completedDepth;
-            info.scoreCp = std::clamp(bestScore, -MateScore, MateScore);
-            info.nodes = nodes_.load();
-            info.timeMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - searchStart).count());
-            info.bestMove = bestMoves.front();
+            info.multipv = pv + 1;
+            info.scoreCp = std::clamp(lastRootScores_[pv].score, -MateScore, MateScore);
+            info.nodes = curNodes;
+            info.timeMs = elapsedMs;
+            info.bestMove = lastRootScores_[pv].move;
             info.hasBestMove = true;
-            info.pv.push_back(bestMoves.front());
+            info.pv.push_back(lastRootScores_[pv].move);
             Board pvBoard = board;
-            applyMove(pvBoard, bestMoves.front());
+            applyMove(pvBoard, lastRootScores_[pv].move);
             auto pvTail = extractPV(pvBoard, completedDepth);
             info.pv.insert(info.pv.end(), pvTail.begin(), pvTail.end());
-            if (std::abs(depthBestScore) >= MateScore) {
+            if (std::abs(lastRootScores_[pv].score) >= MateScore) {
                 info.isMate = true;
-                const int distance = std::abs(depthBestScore) - MateScore;
+                const int distance = std::abs(lastRootScores_[pv].score) - MateScore;
                 info.mateInMoves = (distance + 1) / 2;
-                if (depthBestScore < 0) info.mateInMoves = -info.mateInMoves;
+                if (lastRootScores_[pv].score < 0) info.mateInMoves = -info.mateInMoves;
             }
-            setLastSearchInfo(info);
+            if (pv == 0) setLastSearchInfo(info);
             if (infoCallback) infoCallback(info);
-            lastInfoTime = std::chrono::steady_clock::now();
+        }
+        lastInfoTime = std::chrono::steady_clock::now();
 
-            struct IndexedScore { int index; int score; };
-            std::vector<IndexedScore> ranked(legal.size());
-            for (int i = 0; i < static_cast<int>(legal.size()); ++i) ranked[i] = {i, scores[i]};
-            std::stable_sort(ranked.begin(), ranked.end(), [](const IndexedScore& a, const IndexedScore& b) { return a.score > b.score; });
+        {
             MoveList reordered;
-            for (int i = 0; i < static_cast<int>(ranked.size()); ++i) reordered.push_back(legal[ranked[i].index]);
+            for (const auto& r : ranked) reordered.push_back(legal[r.index]);
             legal = reordered;
+        }
 
-            if (limits.moveTimeMs <= 0 && !limits.infinite) {
-                if (prevBestMove.to >= 0 && sameMove(depthBestMoves.front(), prevBestMove)) {
-                    ++bestMoveStableCount;
-                } else {
-                    bestMoveStableCount = 0;
-                }
-                prevBestMove = depthBestMoves.front();
+        if (limits.moveTimeMs <= 0 && !limits.infinite) {
+            if (prevBestMove.to >= 0 && sameMove(depthBestMoves.front(), prevBestMove)) {
+                ++bestMoveStableCount;
+            } else {
+                bestMoveStableCount = 0;
+            }
+            prevBestMove = depthBestMoves.front();
 
-                const auto now = std::chrono::steady_clock::now();
-                const int elapsed = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - searchStart).count());
+            const auto now2 = std::chrono::steady_clock::now();
+            const int elapsed = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now2 - searchStart).count());
 
-                if (depth >= 2 && std::abs(depthBestScore - prevIterScore) > 80) {
-                    optimumTime = std::min(optimumTime * 3 / 2, maximumTime);
-                }
-                if (depth >= 3 && bestMoveStableCount == 0) {
-                    optimumTime = std::min(optimumTime * 13 / 10, maximumTime);
-                }
-
-                if (depth >= 5 && bestMoveStableCount >= 3 && elapsed >= optimumTime * 3 / 5) {
-                    stopped_.store(true);
-                } else if (elapsed >= optimumTime) {
-                    stopped_.store(true);
-                }
+            if (depth >= 2 && std::abs(depthBestScore - prevIterScore) > 80) {
+                optimumTime = std::min(optimumTime * 3 / 2, maximumTime);
+            }
+            if (depth >= 3 && bestMoveStableCount == 0) {
+                optimumTime = std::min(optimumTime * 13 / 10, maximumTime);
             }
 
-            prevIterScore = depthBestScore;
+            if (depth >= 5 && bestMoveStableCount >= 3 && elapsed >= optimumTime * 3 / 5) {
+                stopped_.store(true);
+            } else if (elapsed >= optimumTime) {
+                stopped_.store(true);
+            }
         }
+
+        prevIterScore = depthBestScore;
     }
 
     stopped_.store(true);

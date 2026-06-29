@@ -46,6 +46,9 @@ public:
     void setParam(const std::string& name, int value);
     int getParam(const std::string& name) const;
     void setRootPruneWidth(int w) { rootPruneWidth_ = w; }
+    void setMultiPV(int n) { multiPV_ = std::max(1, n); }
+    int multiPV() const { return multiPV_; }
+    const std::vector<RootMoveScore>& lastRootScores() const { return lastRootScores_; }
 
 private:
     int search(Board& board, int depth, int ply, int alpha, int beta, bool allowNullMove = true, const Move& prevMove = Move{}, const Move& excludedMove = Move{}) const;
@@ -127,6 +130,8 @@ private:
     std::mt19937 rng_;
     int searchDepth_ = 0;
     int rootPruneWidth_ = 15;
+    int multiPV_ = 1;
+    mutable std::vector<RootMoveScore> lastRootScores_;
 };
 
 } // namespace shogi
