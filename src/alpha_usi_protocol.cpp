@@ -136,7 +136,7 @@ void alphaUsiLoop() {
             std::cout << "option name MctsSimulations type spin default 10000 min 1 max 1000000" << std::endl;
             std::cout << "option name NNModel type string default alpha_model.onnx" << std::endl;
             std::cout << "option name NNDevice type string default auto" << std::endl;
-            std::cout << "option name MctsBatchSize type spin default 16 min 1 max 64" << std::endl;
+            std::cout << "option name MctsBatchSize type spin default 16 min 1 max 256" << std::endl;
             std::cout << "option name FPUReduction type spin default 20 min 0 max 100" << std::endl;
             std::cout << "option name TemperatureDropMove type spin default 30 min 0 max 200" << std::endl;
             std::cout << "option name Book type check default true" << std::endl;

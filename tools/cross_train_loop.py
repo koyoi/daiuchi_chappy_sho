@@ -35,6 +35,30 @@ import sys
 import time
 from pathlib import Path
 
+def _ensure_cuda_lib_path():
+    """Add pip-installed NVIDIA CUDA 12 libraries to LD_LIBRARY_PATH."""
+    dirs = []
+    for pkg in ("nvidia.cublas", "nvidia.cuda_runtime", "nvidia.cufft", "nvidia.cudnn"):
+        try:
+            mod = __import__(pkg, fromlist=["lib"])
+            if hasattr(mod, "__file__") and mod.__file__:
+                lib_dir = str(Path(mod.__file__).parent / "lib")
+            elif hasattr(mod, "__path__"):
+                lib_dir = str(Path(list(mod.__path__)[0]) / "lib")
+            else:
+                continue
+            if Path(lib_dir).is_dir():
+                dirs.append(lib_dir)
+        except ImportError:
+            pass
+    if dirs:
+        existing = os.environ.get("LD_LIBRARY_PATH", "")
+        missing = [d for d in dirs if d not in existing]
+        if missing:
+            os.environ["LD_LIBRARY_PATH"] = ":".join(missing) + ((":" + existing) if existing else "")
+
+_ensure_cuda_lib_path()
+
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -442,6 +466,7 @@ def main():
     g.add_argument("--alpha-movetime", type=int, default=500, help="Alpha ms/move")
     g.add_argument("--nnue-movetime", type=int, default=500, help="NNUE ms/move")
     g.add_argument("--alpha-simulations", type=int, default=400)
+    g.add_argument("--alpha-batch-size", type=int, default=64)
     g.add_argument("--random-plies", type=int, default=4)
     g.add_argument("--eval-weight", type=float, default=0.7,
                    help="NNUE label blend: eval_weight*eval + (1-eval_weight)*outcome")
@@ -514,6 +539,7 @@ def main():
             model=str(alpha_best_onnx) if alpha_best_onnx.exists() else None,
             device=args.device if args.device != "auto" else None,
             simulations=args.alpha_simulations,
+            batch_size=args.alpha_batch_size,
             temperature_drop=30,
         )
         nnue_extra = {}
@@ -557,6 +583,7 @@ def main():
                 model=str(alpha_best_onnx) if alpha_best_onnx.exists() else None,
                 device=args.device if args.device != "auto" else None,
                 simulations=args.alpha_simulations,
+                batch_size=args.alpha_batch_size,
                 temperature_drop=30,
             )
             alpha_eng2.start()

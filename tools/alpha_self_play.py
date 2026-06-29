@@ -12,12 +12,38 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
 import numpy as np
 from pathlib import Path
 from typing import Optional
+
+
+def _ensure_cuda_lib_path():
+    """Add pip-installed NVIDIA CUDA 12 libraries to LD_LIBRARY_PATH."""
+    dirs = []
+    for pkg in ("nvidia.cublas", "nvidia.cuda_runtime", "nvidia.cufft", "nvidia.cudnn"):
+        try:
+            mod = __import__(pkg, fromlist=["lib"])
+            if hasattr(mod, "__file__") and mod.__file__:
+                lib_dir = str(Path(mod.__file__).parent / "lib")
+            elif hasattr(mod, "__path__"):
+                lib_dir = str(Path(list(mod.__path__)[0]) / "lib")
+            else:
+                continue
+            if Path(lib_dir).is_dir():
+                dirs.append(lib_dir)
+        except ImportError:
+            pass
+    if dirs:
+        existing = os.environ.get("LD_LIBRARY_PATH", "")
+        missing = [d for d in dirs if d not in existing]
+        if missing:
+            os.environ["LD_LIBRARY_PATH"] = ":".join(missing) + ((":" + existing) if existing else "")
+
+_ensure_cuda_lib_path()
 
 from csa_parser import (
     Board, idx, file_of, rank_of, CSA_PIECE_MAP, PIECE_TYPE_FROM_ID, HAND_INDEX,
