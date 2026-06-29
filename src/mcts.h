@@ -24,26 +24,25 @@ struct MCTSNode {
     std::atomic<double> valueSum{0.0};
     double prior = 0.0;
     bool expanded = false;
+    bool terminal = false;
 
     double q() const {
         int n = visitCount.load(std::memory_order_relaxed);
         return n > 0 ? valueSum.load(std::memory_order_relaxed) / n : 0.0;
     }
-
-    double ucb(double cPuct, int parentVisits) const {
-        int n = visitCount.load(std::memory_order_relaxed);
-        return q() + cPuct * prior * std::sqrt(static_cast<double>(parentVisits)) / (1.0 + n);
-    }
 };
 
 struct MCTSConfig {
     int simulations = 800;
-    double cPuct = 1.5;
+    double cPuctBase = 19652.0;
+    double cPuctInit = 2.5;
+    double fpuReduction = 0.2;
     double dirichletAlpha = 0.15;
     double dirichletEpsilon = 0.25;
     int batchSize = 8;
     int virtualLoss = 3;
     bool addNoise = true;
+    int temperatureDropMove = 30;
 };
 
 struct MCTSResult {
@@ -68,6 +67,7 @@ public:
     void clearTree() { retainedTree_.reset(); }
 
 private:
+    double dynamicCPuct(int parentVisits) const;
     MCTSNode* select(MCTSNode* node) const;
     bool expandMoves(MCTSNode* node, const Board& board);
     void applyNNOutput(MCTSNode* node, const NNOutput& output, const Board& board);

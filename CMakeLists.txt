@@ -53,18 +53,8 @@ else()
     target_compile_options(kishi-to-classic PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-# --- MCTSエンジン (Transformer + MCTS) ---
+# --- MCTSエンジン (Transformer + MCTS, ONNX Runtime 必須) ---
 option(USE_ONNXRUNTIME "Use ONNX Runtime for direct C++ NN inference" OFF)
-
-set(MCTS_SOURCES
-    src/mcts.cpp
-    src/nn_bridge.cpp
-    src/mate_solver.cpp
-    src/opening_book.cpp
-    src/mcts_engine.cpp
-    src/mcts_usi_protocol.cpp
-    src/mcts_main.cpp
-)
 
 if(USE_ONNXRUNTIME)
     find_library(ONNXRUNTIME_LIB onnxruntime
@@ -72,28 +62,34 @@ if(USE_ONNXRUNTIME)
     find_path(ONNXRUNTIME_INCLUDE onnxruntime_cxx_api.h
         PATHS "${ONNXRUNTIME_ROOT}/include" ENV ONNXRUNTIME_ROOT
         PATH_SUFFIXES onnxruntime)
-    if(ONNXRUNTIME_LIB AND ONNXRUNTIME_INCLUDE)
-        message(STATUS "ONNX Runtime found: ${ONNXRUNTIME_LIB}")
-        list(APPEND MCTS_SOURCES src/onnx_inference.cpp)
-    else()
-        message(WARNING "ONNX Runtime not found (set ONNXRUNTIME_ROOT). Building without ONNX.")
+    if(NOT ONNXRUNTIME_LIB OR NOT ONNXRUNTIME_INCLUDE)
+        message(WARNING "ONNX Runtime not found (set ONNXRUNTIME_ROOT). kishi-to (MCTS) will not be built.")
         set(USE_ONNXRUNTIME OFF)
+    else()
+        message(STATUS "ONNX Runtime found: ${ONNXRUNTIME_LIB}")
     endif()
 endif()
 
-add_executable(kishi-to ${MCTS_SOURCES})
-target_link_libraries(kishi-to PRIVATE shogi_core)
-target_compile_features(kishi-to PRIVATE cxx_std_17)
-if(MSVC)
-    target_compile_options(kishi-to PRIVATE /W4 /permissive- /utf-8)
-else()
-    target_compile_options(kishi-to PRIVATE -Wall -Wextra -Wpedantic)
-endif()
-
 if(USE_ONNXRUNTIME)
-    target_compile_definitions(kishi-to PRIVATE HAS_ONNXRUNTIME=1)
+    add_executable(kishi-to
+        src/mcts.cpp
+        src/nn_bridge.cpp
+        src/onnx_inference.cpp
+        src/mate_solver.cpp
+        src/opening_book.cpp
+        src/mcts_engine.cpp
+        src/mcts_usi_protocol.cpp
+        src/mcts_main.cpp
+    )
+    target_link_libraries(kishi-to PRIVATE shogi_core)
+    target_compile_features(kishi-to PRIVATE cxx_std_17)
     target_include_directories(kishi-to PRIVATE ${ONNXRUNTIME_INCLUDE})
     target_link_libraries(kishi-to PRIVATE ${ONNXRUNTIME_LIB})
+    if(MSVC)
+        target_compile_options(kishi-to PRIVATE /W4 /permissive- /utf-8)
+    else()
+        target_compile_options(kishi-to PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
 endif()
 
 # --- NNUEエンジン (NNUE評価 + alpha-beta) ---
@@ -112,13 +108,6 @@ if(MSVC)
 else()
     target_compile_options(kishi-to-nnue PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-
-add_custom_command(TARGET kishi-to POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:kishi-to>/tools"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/tools/nn_eval.py"
-        "$<TARGET_FILE_DIR:kishi-to>/tools/nn_eval.py"
-)
 
 # --- Alphaエンジン (ResNet-SE + 改良MCTS) ---
 set(ALPHA_SOURCES

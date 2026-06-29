@@ -1,0 +1,2 @@
+/home/fujita_ryohei/miniconda3/bin/x86_64-conda-linux-gnu-ar qc libshogi_core.a CMakeFiles/shogi_core.dir/src/shogi_types.cpp.o CMakeFiles/shogi_core.dir/src/movegen.cpp.o CMakeFiles/shogi_core.dir/src/position.cpp.o CMakeFiles/shogi_core.dir/src/notation.cpp.o CMakeFiles/shogi_core.dir/src/text_util.cpp.o
+/home/fujita_ryohei/miniconda3/bin/x86_64-conda-linux-gnu-ranlib libshogi_core.a

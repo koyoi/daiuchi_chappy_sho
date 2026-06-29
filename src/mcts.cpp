@@ -13,13 +13,25 @@ namespace shogi {
 
 MCTSEngine::MCTSEngine(NNBridge& nn) : nn_(nn) {}
 
+double MCTSEngine::dynamicCPuct(int parentVisits) const {
+    return std::log((1.0 + parentVisits + config_.cPuctBase) / config_.cPuctBase)
+           + config_.cPuctInit;
+}
+
 MCTSNode* MCTSEngine::select(MCTSNode* node) const {
     while (node->expanded && !node->children.empty()) {
         int parentN = node->visitCount.load(std::memory_order_relaxed);
+        double cPuct = dynamicCPuct(parentN);
+        double parentQ = node->q();
+        double fpuValue = parentQ - config_.fpuReduction;
+        double sqrtParent = std::sqrt(static_cast<double>(parentN));
+
         MCTSNode* best = nullptr;
         double bestScore = -1e9;
         for (auto& child : node->children) {
-            double score = child->ucb(config_.cPuct, parentN);
+            int n = child->visitCount.load(std::memory_order_relaxed);
+            double qVal = (n > 0) ? child->q() : fpuValue;
+            double score = qVal + cPuct * child->prior * sqrtParent / (1.0 + n);
             if (score > bestScore) {
                 bestScore = score;
                 best = child.get();
@@ -35,6 +47,7 @@ bool MCTSEngine::expandMoves(MCTSNode* node, const Board& board) {
     auto legal = generateLegalMoves(board);
     node->expanded = true;
     if (legal.empty()) {
+        node->terminal = true;
         return false;
     }
     node->children.reserve(legal.size());
@@ -212,6 +225,17 @@ reuse_done:
     while (simCount < config_.simulations) {
         if (std::chrono::steady_clock::now() >= deadline) break;
 
+        // Early termination: best move has >90% of visits after 25% of simulations
+        if (simCount > config_.simulations / 4) {
+            int totalVisits = root->visitCount.load(std::memory_order_relaxed);
+            int bestN = 0;
+            for (auto& c : root->children) {
+                int n = c->visitCount.load(std::memory_order_relaxed);
+                if (n > bestN) bestN = n;
+            }
+            if (totalVisits > 0 && bestN * 10 > totalVisits * 9) break;
+        }
+
         std::vector<PendingEval> pending;
         std::vector<Board> evalBoards;
 
@@ -237,8 +261,7 @@ reuse_done:
             }
 
             if (leaf->expanded) {
-                // Terminal or revisit
-                double val = leaf->children.empty() ? 1.0 : -leaf->q();
+                double val = leaf->terminal ? 1.0 : -leaf->q();
                 pending.push_back({leaf, leafBoard, true, -1});
                 backpropagate(leaf, val);
                 ++simCount;
@@ -305,9 +328,9 @@ reuse_done:
         }
     }
 
-    // Select best move
+    // Select best move: temperature schedule based on move number
     MCTSNode* bestChild = nullptr;
-    if (simCount < 30) {
+    if (board.moveNumber <= config_.temperatureDropMove) {
         std::vector<double> weights;
         weights.reserve(root->children.size());
         for (auto& c : root->children) {

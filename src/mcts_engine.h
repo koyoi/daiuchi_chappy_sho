@@ -27,8 +27,6 @@ public:
 
     void setMaxMoveTimeMs(int milliseconds);
     void setSimulations(int n);
-    void setNNPython(const std::string& python);
-    void setNNScript(const std::string& script);
     void setNNModel(const std::string& model);
     void setNNDevice(const std::string& device);
     void setBatchSize(int n);
@@ -37,7 +35,7 @@ public:
     void setReuseTree(bool enabled) { mcts_.setReuseTree(enabled); }
     bool loadBook(const std::string& path = "book.txt");
     bool ensureNN();
-    bool nnReady() const { return nn_.isReady(); }
+    bool nnReady() const;
     const std::string& nnLastError() const;
     const std::string& nnModelPath() const;
     std::string nnDeviceUsed() const;

@@ -1,0 +1,5 @@
+/home/fujita_ryohei/kishi_to/build_test/CMakeFiles/shogi_core.dir
+/home/fujita_ryohei/kishi_to/build_test/CMakeFiles/kishi-to-classic.dir
+/home/fujita_ryohei/kishi_to/build_test/CMakeFiles/kishi-to-nnue.dir
+/home/fujita_ryohei/kishi_to/build_test/CMakeFiles/edit_cache.dir
+/home/fujita_ryohei/kishi_to/build_test/CMakeFiles/rebuild_cache.dir

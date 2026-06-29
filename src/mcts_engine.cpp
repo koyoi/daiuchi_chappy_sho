@@ -139,13 +139,12 @@ void MCTSEngineWrapper::setSimulations(int n) {
     mcts_.setSimulations(simulations_);
 }
 
-void MCTSEngineWrapper::setNNPython(const std::string& python) { nn_.setPython(python); }
-void MCTSEngineWrapper::setNNScript(const std::string& script) { nn_.setScript(script); }
 void MCTSEngineWrapper::setNNModel(const std::string& model) { nn_.setModel(model); }
 void MCTSEngineWrapper::setNNDevice(const std::string& device) { nn_.setDevice(device); }
 void MCTSEngineWrapper::setBatchSize(int n) { mcts_.setBatchSize(n); }
 bool MCTSEngineWrapper::loadBook(const std::string& path) { return book_.load(path); }
-bool MCTSEngineWrapper::ensureNN() { return nn_.ensureProcess(); }
+bool MCTSEngineWrapper::ensureNN() { return nn_.ensureReady(); }
+bool MCTSEngineWrapper::nnReady() const { return nn_.isReady(); }
 const std::string& MCTSEngineWrapper::nnLastError() const { return nn_.lastError(); }
 const std::string& MCTSEngineWrapper::nnModelPath() const { return nn_.modelPath(); }
 std::string MCTSEngineWrapper::nnDeviceUsed() const { return nn_.deviceUsed(); }
