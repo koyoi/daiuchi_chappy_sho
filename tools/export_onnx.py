@@ -33,7 +33,7 @@ def main():
         print(f"ERROR: model file not found: {args.model}", file=sys.stderr)
         return 1
 
-    state = torch.load(args.model, map_location="cpu", weights_only=True)
+    state = torch.load(args.model, map_location="cpu", weights_only=False)
     model.load_state_dict(state)
     model.eval()
 

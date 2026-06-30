@@ -72,13 +72,49 @@ class ShogiTransformerModel:
         import torch
         import torch.nn.functional as F
 
+        d_head = d_model // nhead
+        seq_len = BOARD_SQUARES + 2 * HAND_TYPES  # 95
+
+        class RelPosEncoderLayer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.nhead = nhead
+                self.d_head = d_head
+                self.qkv_proj = nn.Linear(d_model, 3 * d_model)
+                self.out_proj = nn.Linear(d_model, d_model)
+                self.ff = nn.Sequential(
+                    nn.Linear(d_model, dim_ff), nn.ReLU(),
+                    nn.Linear(dim_ff, d_model),
+                )
+                self.norm1 = nn.LayerNorm(d_model)
+                self.norm2 = nn.LayerNorm(d_model)
+                self.attn_drop = nn.Dropout(0.1)
+                self.drop1 = nn.Dropout(0.1)
+                self.drop2 = nn.Dropout(0.1)
+                self.scale = d_head ** -0.5
+
+            def forward(self, x, rel_bias):
+                B, L, D = x.shape
+                qkv = self.qkv_proj(x).reshape(B, L, 3, self.nhead, self.d_head)
+                q, k, v = qkv.unbind(2)
+                q = q.transpose(1, 2)
+                k = k.transpose(1, 2)
+                v = v.transpose(1, 2)
+                attn = (q @ k.transpose(-2, -1)) * self.scale + rel_bias
+                attn = F.softmax(attn, dim=-1)
+                attn = self.attn_drop(attn)
+                out = (attn @ v).transpose(1, 2).reshape(B, L, D)
+                out = self.out_proj(out)
+                x = self.norm1(x + self.drop1(out))
+                x = self.norm2(x + self.drop2(self.ff(x)))
+                return x
+
         class _Model(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.d_model = d_model
+                self.nhead = nhead
                 self.piece_embed = nn.Embedding(VOCAB_SIZE, d_model)
-                self.file_embed = nn.Embedding(9, d_model)
-                self.rank_embed = nn.Embedding(9, d_model)
                 self.hand_pos_embed = nn.Embedding(2 * HAND_TYPES, d_model)
                 self.hand_count_embed = nn.Embedding(HAND_MAX + 1, d_model)
                 self.side_embed = nn.Embedding(2, d_model)
@@ -91,11 +127,11 @@ class ShogiTransformerModel:
                     nn.Conv2d(d_model, d_model, 3, padding=1),
                 )
 
-                encoder_layer = nn.TransformerEncoderLayer(
-                    d_model=d_model, nhead=nhead, dim_feedforward=dim_ff,
-                    batch_first=True, dropout=0.1,
-                )
-                self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+                self.layers = nn.ModuleList([RelPosEncoderLayer() for _ in range(num_layers)])
+                self.rel_bias_table = nn.Parameter(torch.zeros(nhead, 17, 17))
+                self.board_hand_bias = nn.Parameter(torch.zeros(nhead))
+                self.hand_board_bias = nn.Parameter(torch.zeros(nhead))
+                self.hand_hand_bias = nn.Parameter(torch.zeros(nhead))
 
                 self.value_head = nn.Sequential(
                     nn.Linear(d_model, 64),
@@ -110,16 +146,27 @@ class ShogiTransformerModel:
                     nn.Linear(512, POLICY_SIZE),
                 )
 
+                board_pos = torch.arange(BOARD_SQUARES)
+                rel_file = (board_pos % 9).unsqueeze(0) - (board_pos % 9).unsqueeze(1) + 8
+                rel_rank = (board_pos // 9).unsqueeze(0) - (board_pos // 9).unsqueeze(1) + 8
+                self.register_buffer('rel_file_idx', rel_file)
+                self.register_buffer('rel_rank_idx', rel_rank)
+
+            def _build_rel_bias(self):
+                B2B = self.rel_bias_table[:, self.rel_rank_idx, self.rel_file_idx]
+                bias = B2B.new_zeros(self.nhead, seq_len, seq_len)
+                bias[:, :BOARD_SQUARES, :BOARD_SQUARES] = B2B
+                bias[:, :BOARD_SQUARES, BOARD_SQUARES:] = self.board_hand_bias.unsqueeze(-1).unsqueeze(-1)
+                bias[:, BOARD_SQUARES:, :BOARD_SQUARES] = self.hand_board_bias.unsqueeze(-1).unsqueeze(-1)
+                bias[:, BOARD_SQUARES:, BOARD_SQUARES:] = self.hand_hand_bias.unsqueeze(-1).unsqueeze(-1)
+                return bias
+
             def forward(self, board_tokens, hand_tokens, side_token,
                         own_atk=None, opp_atk=None):
                 B = board_tokens.shape[0]
-                dev = board_tokens.device
                 d = self.d_model
 
                 board_emb = self.piece_embed(board_tokens)
-                files = torch.arange(BOARD_SQUARES, device=dev) % 9
-                ranks = torch.arange(BOARD_SQUARES, device=dev) // 9
-                board_emb = board_emb + self.file_embed(files) + self.rank_embed(ranks)
 
                 if own_atk is not None:
                     board_emb = board_emb + self.own_attack_embed(own_atk)
@@ -133,18 +180,20 @@ class ShogiTransformerModel:
                 board_emb = F.relu(x + residual)
 
                 hand_emb = self.hand_count_embed(hand_tokens)
-                hand_ids = torch.arange(2 * HAND_TYPES, device=dev)
+                hand_ids = torch.arange(2 * HAND_TYPES, device=board_tokens.device)
                 hand_emb = hand_emb + self.hand_pos_embed(hand_ids)
 
                 seq = torch.cat([board_emb, hand_emb], dim=1)
                 seq = seq + self.side_embed(side_token).unsqueeze(1)
 
-                out = self.transformer(seq)
+                rel_bias = self._build_rel_bias()
+                for layer in self.layers:
+                    seq = layer(seq, rel_bias)
 
-                global_repr = out.mean(dim=1)
+                global_repr = seq.mean(dim=1)
                 value = self.value_head(global_repr).squeeze(-1)
 
-                board_out = out[:, :BOARD_SQUARES, :].reshape(B, -1)
+                board_out = seq[:, :BOARD_SQUARES, :].reshape(B, -1)
                 policy_logits = self.policy_head(board_out)
 
                 return value, policy_logits
@@ -202,7 +251,7 @@ def load_model(model_path, torch_mod, nn, device, require_exists=True):
         if require_exists:
             raise FileNotFoundError(model_path)
         return model
-    state = torch_mod.load(model_path, map_location=device, weights_only=True)
+    state = torch_mod.load(model_path, map_location=device, weights_only=False)
     try:
         model.load_state_dict(state)
     except RuntimeError as e:

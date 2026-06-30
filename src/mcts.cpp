@@ -318,7 +318,7 @@ reuse_done:
                 SearchInfo info;
                 info.pv = extractPV(root.get());
                 info.depth = static_cast<int>(info.pv.size());
-                info.scoreCp = static_cast<int>(bestChild->q() * 1000);
+                info.scoreCp = mctsValueToCp(bestChild->q());
                 info.nodes = simCount;
                 info.timeMs = elapsed;
                 info.bestMove = bestChild->move;

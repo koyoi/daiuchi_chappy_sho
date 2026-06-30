@@ -24,11 +24,10 @@ MOVE_TIMEOUT = 30
 
 class USIEngine:
     def __init__(self, engine_path: str, model: Optional[str] = None,
-                 python: Optional[str] = None, device: Optional[str] = None,
+                 device: Optional[str] = None,
                  simulations: Optional[int] = None):
         self.engine_path = engine_path
         self.model = model
-        self.python = python
         self.device = device
         self.simulations = simulations
         self.proc: Optional[subprocess.Popen] = None
@@ -57,8 +56,6 @@ class USIEngine:
         self._send("setoption name RecordOnly value true")
         if self.model:
             self._send(f"setoption name NNModel value {self.model}")
-        if self.python:
-            self._send(f"setoption name NNPython value {self.python}")
         if self.device:
             self._send(f"setoption name NNDevice value {self.device}")
         if self.simulations is not None:
@@ -182,10 +179,10 @@ def play_one_game(engine_black: USIEngine, engine_white: USIEngine,
 
 
 def run_match(engine_path: str, model1: Optional[str], model2: Optional[str],
-              games: int, movetime: int, python: Optional[str],
+              games: int, movetime: int,
               device: Optional[str], simulations: Optional[int] = None) -> dict:
-    e1 = USIEngine(engine_path, model1, python, device, simulations)
-    e2 = USIEngine(engine_path, model2, python, device, simulations)
+    e1 = USIEngine(engine_path, model1, device, simulations)
+    e2 = USIEngine(engine_path, model2, device, simulations)
 
     label1 = Path(model1).stem if model1 else "default"
     label2 = Path(model2).stem if model2 else "default"
@@ -286,7 +283,6 @@ def main():
     parser.add_argument("--model2", default=None, help="Model path for engine 2")
     parser.add_argument("--games", type=int, default=20, help="Number of games")
     parser.add_argument("--movetime", type=int, default=1000, help="Time per move (ms)")
-    parser.add_argument("--python", default=None, help="Python path for NNPython option")
     parser.add_argument("--device", default=None, help="Device for NNDevice option")
     parser.add_argument("--simulations", type=int, default=None,
                         help="MCTS simulations per move (overrides engine default)")
@@ -294,7 +290,7 @@ def main():
 
     result = run_match(
         args.engine, args.model1, args.model2,
-        args.games, args.movetime, args.python, args.device,
+        args.games, args.movetime, args.device,
         args.simulations,
     )
 
