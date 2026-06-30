@@ -444,7 +444,7 @@ def main():
     model = build_model(nn, channels=args.channels, num_blocks=args.blocks).to(device)
     resumed = False
     if args.resume and model_path.exists():
-        state = torch_mod.load(model_path, map_location=device, weights_only=True)
+        state = torch_mod.load(model_path, map_location=device, weights_only=False)
         model.load_state_dict(state)
         resumed = True
         print(f"Resumed from {model_path}", file=sys.stderr)

@@ -94,7 +94,7 @@ def main():
     model = build_model(nn, channels=args.channels, num_blocks=args.blocks).to(device)
     model_path = Path(args.model)
     if model_path.exists():
-        state = torch_mod.load(model_path, map_location=device, weights_only=True)
+        state = torch_mod.load(model_path, map_location=device, weights_only=False)
         model.load_state_dict(state)
         print(f"Loaded model from {model_path}", file=sys.stderr)
     else:
@@ -108,10 +108,13 @@ def main():
     total_batches = (n + args.batch_size - 1) // args.batch_size
     total_steps = total_batches * args.epochs
 
-    scheduler = torch_mod.optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=args.lr, total_steps=total_steps,
-        pct_start=0.1, anneal_strategy='cos', div_factor=10, final_div_factor=100,
-    )
+    if total_steps >= 10:
+        scheduler = torch_mod.optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=args.lr, total_steps=total_steps,
+            pct_start=0.1, anneal_strategy='cos', div_factor=10, final_div_factor=100,
+        )
+    else:
+        scheduler = None
 
     wdl_loss_fn = nn.CrossEntropyLoss()
 
@@ -151,7 +154,8 @@ def main():
             loss.backward()
             torch_mod.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            scheduler.step()
+            if scheduler is not None:
+                scheduler.step()
 
             total_loss_v += loss_v.item()
             total_loss_p += loss_p.item()

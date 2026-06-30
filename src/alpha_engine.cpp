@@ -119,7 +119,7 @@ Move AlphaEngineWrapper::chooseMove(const Board& board, const SearchLimits& limi
     SearchInfo info;
     info.pv = result.pv;
     info.depth = static_cast<int>(result.pv.size());
-    info.scoreCp = static_cast<int>(result.winRate * 1000);
+    info.scoreCp = mctsValueToCp(result.winRate);
     info.nodes = result.simulations;
     info.timeMs = result.timeMs;
     info.bestMove = result.bestMove;

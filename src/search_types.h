@@ -2,6 +2,7 @@
 
 #include "shogi_types.h"
 
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -33,6 +34,12 @@ struct RootMoveScore {
     Move move{};
     int score = 0;
 };
+
+inline int mctsValueToCp(double v) {
+    double wp = (v + 1.0) / 2.0;
+    wp = std::max(0.001, std::min(0.999, wp));
+    return static_cast<int>(std::log(wp / (1.0 - wp)) * 300.0);
+}
 
 using InfoCallback = std::function<void(const SearchInfo&)>;
 

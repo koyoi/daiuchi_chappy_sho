@@ -111,7 +111,7 @@ def main():
     # Build teacher (frozen)
     teacher = build_model(nn, channels=args.teacher_channels,
                           num_blocks=args.teacher_blocks).to(device)
-    teacher_state = torch.load(args.teacher, map_location=device, weights_only=True)
+    teacher_state = torch.load(args.teacher, map_location=device, weights_only=False)
     teacher.load_state_dict(teacher_state)
     teacher.eval()
     for p in teacher.parameters():
@@ -124,7 +124,7 @@ def main():
     student = build_model(nn, channels=args.student_channels,
                           num_blocks=args.student_blocks).to(device)
     if args.student and Path(args.student).exists():
-        student.load_state_dict(torch.load(args.student, map_location=device, weights_only=True))
+        student.load_state_dict(torch.load(args.student, map_location=device, weights_only=False))
         print(f"Resumed student from {args.student}", file=sys.stderr)
     s_params = sum(p.numel() for p in student.parameters())
     print(f"Student: {s_params/1e6:.1f}M params ({args.student_channels}ch x {args.student_blocks}blk)",
