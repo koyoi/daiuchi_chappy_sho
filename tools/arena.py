@@ -1201,6 +1201,218 @@ def train_and_gate_mcts(work_dir: Path, engine: ArenaEngine, iteration: int,
 
 
 # ---------------------------------------------------------------------------
+# Self-play training for top engines (Feature A)
+# ---------------------------------------------------------------------------
+
+def self_play_and_train_alpha(
+    work_dir: Path,
+    engine: ArenaEngine,
+    iteration: int,
+    num_games: int,
+    gate_games: int,
+    gate_movetime: int,
+    gate_threshold: float,
+    gate_parallel: int = 1,
+    opening_suite: list[str] | None = None,
+) -> bool:
+    """Run Alpha self-play games, train, and gate."""
+    data_dir = work_dir / "alpha" / "data"
+    model_dir = work_dir / "alpha" / "models"
+
+    best_onnx = model_dir / "best.onnx"
+    if not best_onnx.exists():
+        print("  Alpha self-play: no best model, skipping", file=sys.stderr)
+        return False
+
+    data_path = data_dir / f"selfplay_{iteration:04d}.npz"
+    model_str = str(best_onnx.resolve())
+    simulations = engine.options.get("MctsSimulations", "400")
+    batch_size = engine.options.get("MctsBatchSize", "16")
+    device = engine.options.get("NNDevice", "auto")
+
+    sp_cmd = [
+        sys.executable, "tools/alpha_self_play.py",
+        "--engine", str(Path(engine.exe_path).resolve()),
+        "--model", model_str,
+        "--games", str(num_games),
+        "--simulations", simulations,
+        "--batch-size", batch_size,
+        "--movetime", "1000",
+        "--output", str(data_path),
+    ]
+    if device and device != "auto":
+        sp_cmd += ["--device", device]
+
+    if run_cmd(sp_cmd, f"Alpha self-play ({num_games} games, iter {iteration})") != 0:
+        return False
+    if not data_path.exists():
+        return False
+
+    return train_and_gate_alpha(
+        work_dir, engine, iteration,
+        gate_games, gate_movetime, gate_threshold, gate_parallel, opening_suite,
+    )
+
+
+def self_play_and_train_mcts(
+    work_dir: Path,
+    engine: ArenaEngine,
+    iteration: int,
+    num_games: int,
+    movetime: int,
+    gate_games: int,
+    gate_movetime: int,
+    gate_threshold: float,
+    gate_parallel: int = 1,
+    opening_suite: list[str] | None = None,
+) -> bool:
+    """Run MCTS self-play, collect positions, train, and gate."""
+    data_dir = work_dir / "mcts" / "data"
+    model_dir = work_dir / "mcts" / "models"
+
+    best_onnx = model_dir / "best.onnx"
+    if not best_onnx.exists():
+        print("  MCTS self-play: no best model, skipping", file=sys.stderr)
+        return False
+
+    from csa_parser import move_to_index
+    from nnue_self_play import parse_usi_move
+
+    e1 = ArenaEngine("mcts_sp1", engine.exe_path, "mcts", dict(engine.options))
+    e2 = ArenaEngine("mcts_sp2", engine.exe_path, "mcts", dict(engine.options))
+    e1.start()
+    e2.start()
+
+    all_positions: list[dict] = []
+    try:
+        for gi in range(num_games):
+            record = play_arena_game(e1, e2, movetime)
+            all_positions.extend(record["mcts_positions"])
+            result_str = record["result"]
+            print(f"  MCTS self-play {gi+1}/{num_games}: {result_str} "
+                  f"({record['ply_count']}mv, {len(record['mcts_positions'])} pos)",
+                  file=sys.stderr)
+    finally:
+        e1.quit()
+        e2.quit()
+
+    if not all_positions:
+        print("  MCTS self-play: no positions collected", file=sys.stderr)
+        return False
+
+    data_path = str(data_dir / f"selfplay_{iteration:04d}.npz")
+    save_mcts_data(all_positions, {}, data_path)
+    print(f"  MCTS self-play: saved {len(all_positions)} positions", file=sys.stderr)
+
+    return train_and_gate_mcts(
+        work_dir, engine, iteration,
+        gate_games, gate_movetime, gate_threshold, gate_parallel, opening_suite,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Intensive training for weak engines (Feature B)
+# ---------------------------------------------------------------------------
+
+def distill_for_weak_engines(
+    work_dir: Path,
+    engines: dict[str, ArenaEngine],
+    elo: EloTracker,
+    iteration: int,
+    game_records: list[dict],
+    gate_games: int,
+    gate_movetime: int,
+    gate_threshold: float,
+    gate_parallel_cpu: int,
+    opening_suite: list[str] | None = None,
+    min_positions: int = 500,
+) -> dict[str, str]:
+    """Intensively train weak engines using strongest engine's evaluations.
+
+    Collects ALL positions from game records where the strongest engine
+    provided evaluations, then trains each weak engine.
+    """
+    trained = {}
+    names = list(engines.keys())
+    if len(names) < 2:
+        return trained
+
+    teacher = elo.strongest()
+    if teacher is None:
+        return trained
+
+    ratings = elo.snapshot()
+    median = sorted(ratings.values())[len(ratings) // 2]
+    weak_engines = [n for n in names if ratings.get(n, 1500) < median and n != teacher]
+    if not weak_engines:
+        return trained
+
+    teacher_samples = []
+    for record in game_records:
+        teacher_samples.extend(
+            collect_distillation_samples(record, teacher))
+
+    if len(teacher_samples) < min_positions:
+        print(f"  Distill: only {len(teacher_samples)} teacher samples "
+              f"(need {min_positions}), skipping", file=sys.stderr)
+        return trained
+
+    print(f"  Distill: {len(teacher_samples)} positions from {teacher}, "
+          f"training weak engines: {weak_engines}", file=sys.stderr)
+
+    for name in weak_engines:
+        eng = engines[name]
+        if eng.engine_type == "classic":
+            promoted = train_and_gate_classic(
+                work_dir, eng, iteration, list(teacher_samples),
+                gate_games, gate_movetime, gate_threshold,
+                gate_parallel_cpu, opening_suite,
+            )
+            trained[name] = "promoted" if promoted else "rejected"
+
+        elif eng.engine_type == "nnue":
+            nnue_distill = _distill_to_nnue(game_records, teacher)
+            if len(nnue_distill) >= min_positions:
+                data_path = str(work_dir / "nnue" / "data" / f"distill_{iteration:04d}.npz")
+                n = save_nnue_data(nnue_distill, data_path)
+                if n > 0:
+                    promoted = train_and_gate_nnue(
+                        work_dir, eng, iteration,
+                        gate_games, gate_movetime, gate_threshold,
+                        gate_parallel_cpu, opening_suite,
+                    )
+                    trained[name] = "promoted" if promoted else "rejected"
+
+    return trained
+
+
+def _distill_to_nnue(
+    game_records: list[dict],
+    teacher_name: str,
+    eval_scale: float = 361.0,
+) -> list[dict]:
+    """Build NNUE training samples from teacher engine's evaluations."""
+    samples = []
+    for record in game_records:
+        for p in record["imitation_plies"]:
+            if p["mover"] != teacher_name or p["cp"] is None:
+                continue
+            if not p["bf"] or not p["wf"]:
+                continue
+            cp = p["cp"]
+            label = 1.0 / (1.0 + math.exp(-cp / eval_scale))
+            label = max(0.01, min(0.99, label))
+            samples.append({
+                "black_feats": np.array(p["bf"], dtype=np.int32),
+                "white_feats": np.array(p["wf"], dtype=np.int32),
+                "side_black": p["side_black"],
+                "soft_label": float(label),
+                "ply": p["ply"],
+            })
+    return samples
+
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -1252,6 +1464,12 @@ def main():
                         help="Parallel gate games for CPU engines (nnue/classic)")
     parser.add_argument("--imitation-elo-gap", type=float, default=200.0,
                         help="Min Elo gap for loser to learn from winner's moves (0=disable)")
+    parser.add_argument("--selfplay-games", type=int, default=20,
+                        help="Self-play games per iteration for top engines (0=disable)")
+    parser.add_argument("--selfplay-movetime", type=int, default=500,
+                        help="Self-play movetime (ms)")
+    parser.add_argument("--intensive-training", action="store_true",
+                        help="Intensively train weak engines via distillation each iteration")
     parser.add_argument("--clean-start", action="store_true",
                         help="Delete work-dir and start fresh (Elo 1500, no data)")
 
@@ -1368,6 +1586,7 @@ def main():
     nnue_all_samples: list[dict] = []
     mcts_all_positions: list[dict] = []
     classic_distill_samples: list[tuple[str, str, float]] = []
+    iter_game_records: list[dict] = []
     game_counter = 0
     data_lock = threading.Lock()
 
@@ -1525,6 +1744,7 @@ def main():
                 s.update({"state": "idle"})
             for key in h2h:
                 h2h[key] = [0, 0, 0]
+            iter_game_records.clear()
             _refresh()
 
             free_slots = list(range(n_parallel))
@@ -1651,6 +1871,9 @@ def main():
                             "result": record["result"],
                         })
 
+                        if args.intensive_training:
+                            iter_game_records.append(record)
+
             executor.shutdown(wait=False)
 
             elo.save(elo_path)
@@ -1719,6 +1942,48 @@ def main():
                     args.gate_parallel_cpu, opening_suite)
                 trained["classic"] = "promoted" if promoted else "rejected"
                 classic_distill_samples.clear()
+
+            # --- Feature A: Self-play for top engines ---
+            if args.selfplay_games > 0:
+                ratings = elo.snapshot()
+                median_elo = sorted(ratings.values())[len(ratings) // 2]
+                for name in engine_names:
+                    if ratings.get(name, 1500) < median_elo:
+                        continue
+                    if name in trained:
+                        continue
+                    eng = engines[name]
+                    if eng.engine_type == "alpha":
+                        print(f"  Self-play alpha ({args.selfplay_games} games)...",
+                              file=sys.stderr)
+                        promoted = self_play_and_train_alpha(
+                            work_dir, eng, iteration + 1,
+                            args.selfplay_games,
+                            args.gate_games, args.gate_movetime,
+                            args.gate_threshold, args.gate_parallel_gpu,
+                            opening_suite)
+                        trained["alpha_sp"] = "promoted" if promoted else "rejected"
+                    elif eng.engine_type == "mcts":
+                        print(f"  Self-play mcts ({args.selfplay_games} games)...",
+                              file=sys.stderr)
+                        promoted = self_play_and_train_mcts(
+                            work_dir, eng, iteration + 1,
+                            args.selfplay_games, args.selfplay_movetime,
+                            args.gate_games, args.gate_movetime,
+                            args.gate_threshold, args.gate_parallel_gpu,
+                            opening_suite)
+                        trained["mcts_sp"] = "promoted" if promoted else "rejected"
+
+            # --- Feature B: Intensive distillation for weak engines ---
+            if args.intensive_training and iter_game_records:
+                distill_results = distill_for_weak_engines(
+                    work_dir, engines, elo, iteration + 1,
+                    iter_game_records,
+                    args.gate_games, args.gate_movetime,
+                    args.gate_threshold, args.gate_parallel_cpu,
+                    opening_suite)
+                for k, v in distill_results.items():
+                    trained[f"{k}_distill"] = v
 
             iter_elapsed = time.time() - iter_start
             log_entry = {
