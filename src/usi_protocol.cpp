@@ -84,7 +84,7 @@ void syncPositionAndLearning(
     board = replay;
 }
 
-void handleSetOption(LearningEngine& engine, const std::vector<std::string>& words) {
+void handleSetOption(LearningEngine& engine, const std::vector<std::string>& words, bool& mlpLoadedViaOption) {
     const auto nameIt = std::find(words.begin(), words.end(), "name");
     if (nameIt == words.end() || std::next(nameIt) == words.end()) {
         return;
@@ -144,6 +144,7 @@ void handleSetOption(LearningEngine& engine, const std::vector<std::string>& wor
                     std::cout << "info string ERROR: " << value << " format error (dimension mismatch?)" << std::endl;
             } else {
                 std::cout << "info string MLP weights loaded: " << value << std::endl;
+                mlpLoadedViaOption = true;
             }
         }
     } else if (name == "UseMLP") {
@@ -246,6 +247,7 @@ void usiLoop() {
     LearningEngine engine;
     Color engineSide = Black;
     bool engineSideKnown = false;
+    bool mlpLoadedViaOption = false;
     std::vector<std::string> recordedMoves;
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -279,17 +281,19 @@ void usiLoop() {
             if (engine.loadBook()) {
                 std::cout << "info string Opening book loaded" << std::endl;
             }
-            if (engine.loadMlpWeights("mlp.weights")) {
-                std::cout << "info string MLP evaluation enabled (mlp.weights)" << std::endl;
-            } else {
-                if (fileExists("mlp.weights"))
-                    std::cout << "info string ERROR: mlp.weights format error, using linear evaluation" << std::endl;
-                else
-                    std::cout << "info string mlp.weights not found, using linear evaluation" << std::endl;
+            if (!mlpLoadedViaOption) {
+                if (engine.loadMlpWeights("mlp.weights")) {
+                    std::cout << "info string MLP evaluation enabled (mlp.weights)" << std::endl;
+                } else {
+                    if (fileExists("mlp.weights"))
+                        std::cout << "info string ERROR: mlp.weights format error, using linear evaluation" << std::endl;
+                    else
+                        std::cout << "info string mlp.weights not found, using linear evaluation" << std::endl;
+                }
             }
             std::cout << "readyok" << std::endl;
         } else if (command == "setoption") {
-            handleSetOption(engine, words);
+            handleSetOption(engine, words, mlpLoadedViaOption);
         } else if (command == "usinewgame") {
             board = startpos();
             recordedMoves.clear();

@@ -49,7 +49,7 @@ void printSearchInfo(const SearchInfo& info) {
     std::cout << std::endl;
 }
 
-void handleSetOption(NNUEEngine& engine, const std::vector<std::string>& words) {
+void handleSetOption(NNUEEngine& engine, const std::vector<std::string>& words, bool& nnueLoadedViaOption) {
     const auto nameIt = std::find(words.begin(), words.end(), "name");
     if (nameIt == words.end() || std::next(nameIt) == words.end()) return;
     const auto valueIt = std::find(words.begin(), words.end(), "value");
@@ -72,9 +72,10 @@ void handleSetOption(NNUEEngine& engine, const std::vector<std::string>& words) 
         engine.setWarnOnNoWeights(value != "false" && value != "0");
     } else if (name == "NNUEFile") {
         if (!value.empty()) {
-            if (engine.loadNNUE(value))
+            if (engine.loadNNUE(value)) {
                 std::cout << "info string NNUE loaded: " << value << std::endl;
-            else if (!fileExists(value))
+                nnueLoadedViaOption = true;
+            } else if (!fileExists(value))
                 std::cout << "info string ERROR: " << value << " not found" << std::endl;
             else
                 std::cout << "info string ERROR: " << value << " format error (bad magic or truncated)" << std::endl;
@@ -102,6 +103,7 @@ void nnueUsiLoop() {
         if (searchThread.joinable()) searchThread.join();
     };
 
+    bool nnueLoadedViaOption = false;
     bool quitRequested = false;
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -135,20 +137,22 @@ void nnueUsiLoop() {
             std::cout << "usiok" << std::endl;
         } else if (command == "isready") {
             joinSearch();
-            if (!engine.loadNNUE("nnue.bin")) {
-                if (!fileExists("nnue.bin"))
-                    std::cout << "info string WARNING: nnue.bin not found -- using random weights" << std::endl;
-                else
-                    std::cout << "info string ERROR: nnue.bin format error (expected NNU5) -- using random weights" << std::endl;
-            } else {
-                std::cout << "info string NNUE evaluation loaded" << std::endl;
+            if (!nnueLoadedViaOption) {
+                if (!engine.loadNNUE("nnue.bin")) {
+                    if (!fileExists("nnue.bin"))
+                        std::cout << "info string WARNING: nnue.bin not found -- using random weights" << std::endl;
+                    else
+                        std::cout << "info string ERROR: nnue.bin format error (expected NNU5) -- using random weights" << std::endl;
+                } else {
+                    std::cout << "info string NNUE evaluation loaded" << std::endl;
+                }
             }
             if (engine.loadBook())
                 std::cout << "info string Opening book loaded" << std::endl;
             std::cout << "readyok" << std::endl;
         } else if (command == "setoption") {
             joinSearch();
-            handleSetOption(engine, words);
+            handleSetOption(engine, words, nnueLoadedViaOption);
         } else if (command == "usinewgame") {
             joinSearch();
             board = startpos();

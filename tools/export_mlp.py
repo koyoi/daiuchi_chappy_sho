@@ -31,7 +31,7 @@ def main():
 
     import torch
 
-    state = torch.load(args.model, map_location="cpu", weights_only=True)
+    state = torch.load(args.model, map_location="cpu", weights_only=False)
 
     # Detect model format: new (with BatchNorm at index 0) or legacy
     has_batchnorm = "0.weight" in state and "0.running_mean" in state

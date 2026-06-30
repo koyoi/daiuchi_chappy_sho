@@ -86,6 +86,7 @@ private:
         std::uint64_t key = 0;
         int depth = -1;
         int score = 0;
+        int staticEval = 0;
         std::uint8_t flag = 0;
         std::uint8_t generation = 0;
         Move bestMove{};

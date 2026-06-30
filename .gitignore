@@ -21,3 +21,5 @@ __pycache__/
 *_labeled.tsv
 cross_train_test/
 cross_train_work/
+/arena_work/games/
+/arena_work/classic/data/

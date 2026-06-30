@@ -719,7 +719,7 @@ def main():
 
     model = NNUEModel().to(device)
     if args.resume and os.path.exists(args.resume):
-        sd = torch.load(args.resume, map_location=device, weights_only=True)
+        sd = torch.load(args.resume, map_location=device, weights_only=False)
         _load_state_dict_compat(model, sd)
         print(f"Resumed from {args.resume}")
 
@@ -727,7 +727,7 @@ def main():
     use_sigmoid = (args.loss == "sigmoid")
     if args.bootstrap and os.path.exists(args.bootstrap):
         boot_model = NNUEModel().to(device)
-        sd = torch.load(args.bootstrap, map_location=device, weights_only=True)
+        sd = torch.load(args.bootstrap, map_location=device, weights_only=False)
         _load_state_dict_compat(boot_model, sd)
         print(f"Bootstrapping with model: {args.bootstrap} (lambda={args.lambda_blend})")
         boot_dataset = NNUEDatasetWithSoftLabels(all_samples)
@@ -744,7 +744,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    dl_workers = 0 if sys.platform == "win32" else min(8, workers)
+    dl_workers = 0 if sys.platform == "win32" else min(8, args.workers if args.workers > 0 else (os.cpu_count() or 4))
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
                               num_workers=dl_workers, pin_memory=device.type == "cuda",
                               collate_fn=collate_embag, persistent_workers=dl_workers > 0)

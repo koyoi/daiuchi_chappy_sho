@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import random
@@ -84,6 +85,26 @@ from train_nnue import extract_features_from_board
 
 MAX_MOVES = 256
 GATE_THRESHOLD = 0.55
+
+
+def _fmt_eta(elapsed: float, done: int, total: int) -> str:
+    """Format remaining time and ETA from progress."""
+    if done <= 0:
+        return "ETA: --:--"
+    avg = elapsed / done
+    remaining = avg * (total - done)
+    eta = datetime.datetime.now() + datetime.timedelta(seconds=remaining)
+    rm, rs = divmod(int(remaining), 60)
+    rh, rm = divmod(rm, 60)
+    if rh > 0:
+        remain_str = f"{rh}h{rm:02d}m"
+    else:
+        remain_str = f"{rm}m{rs:02d}s"
+    return f"残り{remain_str} (ETA {eta:%H:%M})"
+
+
+def _now_str() -> str:
+    return datetime.datetime.now().strftime("%H:%M:%S")
 
 
 def search_with_scores(engine: NNUEUSIEngine, pos_cmd: str, movetime: int
@@ -271,6 +292,7 @@ def play_cross_games(
     wins_alpha = 0
     wins_nnue = 0
     draws = 0
+    phase_start = time.time()
 
     for game_idx in range(num_games):
         alpha_is_black = (game_idx % 2 == 0)
@@ -297,12 +319,13 @@ def play_cross_games(
         else:
             wins_nnue += 1
 
+        eta = _fmt_eta(time.time() - phase_start, game_idx + 1, num_games)
         print(
             f"  Game {game_idx+1}/{num_games}: Alpha({alpha_color}) "
             f"result={result} ({ply_count}mv) "
             f"[A:{wins_alpha} N:{wins_nnue} D:{draws} "
             f"alpha_pos:{sum(len(p) for p in all_alpha_positions)} "
-            f"nnue_pos:{len(all_nnue_samples)}]",
+            f"nnue_pos:{len(all_nnue_samples)}] {eta}",
             file=sys.stderr,
         )
 
@@ -316,8 +339,10 @@ def relabel_positions(
     is_mcts: bool = False,
 ):
     """Re-evaluate NNUE positions with deeper search for better labels (in-place)."""
-    print(f"  Relabeling {len(nnue_samples)} positions @ {movetime}ms...", file=sys.stderr)
+    total = len(nnue_samples)
+    print(f"  Relabeling {total} positions @ {movetime}ms... [{_now_str()}]", file=sys.stderr)
     relabeled = 0
+    phase_start = time.time()
     for i, sample in enumerate(nnue_samples):
         pos_cmd = sample.get("pos_cmd")
         if not pos_cmd:
@@ -327,8 +352,9 @@ def relabel_positions(
             sample["soft_label"] = float(cp_to_label(cp, is_mcts))
             relabeled += 1
         if (i + 1) % 100 == 0:
-            print(f"    {i+1}/{len(nnue_samples)} relabeled", file=sys.stderr)
-    print(f"  Relabeled {relabeled}/{len(nnue_samples)} positions", file=sys.stderr)
+            eta = _fmt_eta(time.time() - phase_start, i + 1, total)
+            print(f"    {i+1}/{total} relabeled {eta}", file=sys.stderr)
+    print(f"  Relabeled {relabeled}/{total} positions", file=sys.stderr)
 
 
 def evaluate_nnue(
@@ -363,6 +389,7 @@ def evaluate_nnue(
     wins_new = 0
     losses_new = 0
     draws = 0
+    gate_start = time.time()
 
     def restart_engines():
         nonlocal e_new, e_best
@@ -406,9 +433,10 @@ def evaluate_nnue(
                 draws += 1
                 total = wins_new + losses_new + draws
                 wr = (wins_new + draws * 0.5) / total if total > 0 else 0.5
+                eta = _fmt_eta(time.time() - gate_start, game_idx + 1, games)
                 print(
                     f"  nnue eval {game_idx+1}/{games}: W={wins_new} L={losses_new} D={draws} "
-                    f"WR={wr:.1%} (crash→draw)",
+                    f"WR={wr:.1%} (crash→draw) {eta}",
                     file=sys.stderr,
                 )
                 continue
@@ -422,9 +450,10 @@ def evaluate_nnue(
 
             total = wins_new + losses_new + draws
             wr = (wins_new + draws * 0.5) / total if total > 0 else 0.5
+            eta = _fmt_eta(time.time() - gate_start, game_idx + 1, games)
             print(
                 f"  nnue eval {game_idx+1}/{games}: W={wins_new} L={losses_new} D={draws} "
-                f"WR={wr:.1%}",
+                f"WR={wr:.1%} {eta}",
                 file=sys.stderr,
             )
     finally:
@@ -437,7 +466,7 @@ def evaluate_nnue(
 
 def run_cmd(args: list[str], desc: str) -> int:
     print(f"\n{'='*60}", file=sys.stderr)
-    print(f"  {desc}", file=sys.stderr)
+    print(f"  {desc} [{_now_str()}]", file=sys.stderr)
     print(f"  cmd: {' '.join(args)}", file=sys.stderr)
     print(f"{'='*60}", file=sys.stderr)
     t0 = time.time()
@@ -532,7 +561,7 @@ def main():
         print(f"{'#'*60}", file=sys.stderr)
 
         # ---- Phase 1: Cross-play (Alpha vs NNUE) ----
-        print("\n--- Phase 1: Cross-play ---", file=sys.stderr)
+        print(f"\n--- Phase 1: Cross-play [{_now_str()}] ---", file=sys.stderr)
 
         alpha_eng = AlphaUSIEngine(
             args.alpha_engine,
@@ -563,7 +592,7 @@ def main():
 
         # ---- Phase 2: Optional deep relabeling ----
         if args.relabel_movetime > 0 and all_nnue_samples:
-            print("\n--- Phase 2: Deep relabeling ---", file=sys.stderr)
+            print(f"\n--- Phase 2: Deep relabeling [{_now_str()}] ---", file=sys.stderr)
             relabel_eng = NNUEUSIEngine(
                 args.nnue_engine, hash_mb=128,
                 extra_options={"NNUEFile": str(nnue_best_bin)} if nnue_best_bin.exists() else None,
@@ -575,7 +604,7 @@ def main():
 
         # ---- Phase 3: Optional teacher games (vs MCTS) ----
         if args.mcts_engine and args.teacher_games > 0:
-            print("\n--- Phase 3: Teacher games (vs MCTS) ---", file=sys.stderr)
+            print(f"\n--- Phase 3: Teacher games (vs MCTS) [{_now_str()}] ---", file=sys.stderr)
 
             mcts_eng = NNUEUSIEngine(args.mcts_engine)
             alpha_eng2 = AlphaUSIEngine(
@@ -626,7 +655,7 @@ def main():
                 nnue_eng_t.quit()
 
         # ---- Phase 4: Save data ----
-        print("\n--- Phase 4: Save data ---", file=sys.stderr)
+        print(f"\n--- Phase 4: Save data [{_now_str()}] ---", file=sys.stderr)
 
         alpha_data_path = alpha_data_dir / f"cross_{iteration:04d}.npz"
         arrays = positions_to_arrays(all_alpha_positions, all_alpha_results)
@@ -657,7 +686,7 @@ def main():
             alpha_data_files = alpha_data_files[-30:]
 
         if alpha_data_files:
-            print("\n--- Phase 5: Train Alpha ---", file=sys.stderr)
+            print(f"\n--- Phase 5: Train Alpha [{_now_str()}] ---", file=sys.stderr)
             alpha_candidate_pt = alpha_models_dir / f"candidate_{iteration:04d}.pt"
             alpha_candidate_onnx = alpha_models_dir / f"candidate_{iteration:04d}.onnx"
 
@@ -683,7 +712,7 @@ def main():
                     alpha_wr = 1.0
                     print("  Alpha promoted (no baseline or skip-eval)", file=sys.stderr)
                 else:
-                    print(f"\n--- Gate Alpha ({args.eval_games} games) ---", file=sys.stderr)
+                    print(f"\n--- Gate Alpha ({args.eval_games} games) [{_now_str()}] ---", file=sys.stderr)
                     from alpha_train_loop import evaluate_models
                     alpha_wr = evaluate_models(
                         args.alpha_engine, str(alpha_candidate_onnx), str(alpha_best_onnx),
@@ -712,7 +741,7 @@ def main():
             nnue_data_files = nnue_data_files[-30:]
 
         if nnue_data_files:
-            print("\n--- Phase 6: Train NNUE ---", file=sys.stderr)
+            print(f"\n--- Phase 6: Train NNUE [{_now_str()}] ---", file=sys.stderr)
             nnue_candidate_pt = nnue_models_dir / "candidate.pt"
             nnue_candidate_bin = nnue_models_dir / "candidate.bin"
 
@@ -738,7 +767,7 @@ def main():
                     nnue_wr = 1.0
                     print("  NNUE promoted (no baseline or skip-eval)", file=sys.stderr)
                 else:
-                    print(f"\n--- Gate NNUE ({args.eval_games} games) ---", file=sys.stderr)
+                    print(f"\n--- Gate NNUE ({args.eval_games} games) [{_now_str()}] ---", file=sys.stderr)
                     nnue_wr = evaluate_nnue(
                         args.nnue_engine, str(nnue_candidate_bin), str(nnue_best_bin),
                         args.eval_games, args.eval_movetime,

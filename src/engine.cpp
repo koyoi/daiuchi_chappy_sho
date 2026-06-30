@@ -642,11 +642,17 @@ int LearningEngine::search(Board& board, int depth, int ply, int alpha, int beta
     const int ttIndex = static_cast<int>(key & TTMask);
     const int lockIndex = static_cast<int>((key >> TTBits) % LockCount);
     Move ttMove{};
+    int ttStaticEval = 0;
+    bool ttHasEval = false;
     {
         std::lock_guard<std::mutex> lock(transpositionMutex_[lockIndex]);
         const TranspositionEntry& slot = transposition_[ttIndex];
         if (slot.key == key && isRecentGeneration(slot.generation)) {
             ttMove = slot.bestMove;
+            if (slot.staticEval != 0) {
+                ttStaticEval = slot.staticEval;
+                ttHasEval = true;
+            }
             if (slot.depth >= depth) {
                 if (slot.flag == ExactScore) {
                     return slot.score;
@@ -712,7 +718,7 @@ int LearningEngine::search(Board& board, int depth, int ply, int alpha, int beta
     const bool canFutilityPrune = !inCheck && (depth == 1 || depth == 2);
     int staticEval = 0;
     if (canFutilityPrune) {
-        staticEval = evaluator_.evaluate(board, rootSide);
+        staticEval = ttHasEval ? ttStaticEval : evaluator_.evaluate(board, rootSide);
     }
     const int futilityMargin = depth == 1 ? FutilityMargin1 : FutilityMargin2;
 
@@ -802,6 +808,7 @@ int LearningEngine::search(Board& board, int depth, int ply, int alpha, int beta
                 slot.key = key;
                 slot.depth = depth;
                 slot.score = best;
+                slot.staticEval = canFutilityPrune ? staticEval : (ttHasEval ? ttStaticEval : 0);
                 slot.bestMove = bestMoveLocal;
                 slot.flag = best <= alphaOriginal ? UpperBound : (best >= betaOriginal ? LowerBound : ExactScore);
                 slot.generation = ttGeneration_;
@@ -896,6 +903,7 @@ int LearningEngine::search(Board& board, int depth, int ply, int alpha, int beta
             slot.key = key;
             slot.depth = depth;
             slot.score = best;
+            slot.staticEval = canFutilityPrune ? staticEval : (ttHasEval ? ttStaticEval : 0);
             slot.bestMove = bestMoveLocal;
             slot.flag = best <= alphaOriginal ? UpperBound : (best >= betaOriginal ? LowerBound : ExactScore);
             slot.generation = ttGeneration_;
@@ -918,7 +926,19 @@ int LearningEngine::quiescence(Board& board, int depth, int ply, int alpha, int 
         return 0;
     }
 
-    int standPat = evaluator_.evaluate(board, rootSide);
+    const std::uint64_t qkey = boardHash(board, rootSide);
+    const int qttIndex = static_cast<int>(qkey & TTMask);
+    const int qlockIndex = static_cast<int>((qkey >> TTBits) % LockCount);
+    int standPat;
+    {
+        std::lock_guard<std::mutex> lock(transpositionMutex_[qlockIndex]);
+        const TranspositionEntry& slot = transposition_[qttIndex];
+        if (slot.key == qkey && isRecentGeneration(slot.generation) && slot.staticEval != 0) {
+            standPat = slot.staticEval;
+        } else {
+            standPat = evaluator_.evaluate(board, rootSide);
+        }
+    }
     if (depth <= 0) {
         return standPat;
     }
