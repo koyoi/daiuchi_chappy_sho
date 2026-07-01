@@ -1,0 +1,70 @@
+# Arena設定ファイル
+# コピーして arena.yaml にリネーム、パスを環境に合わせて編集
+#
+# 使い方:
+#   python tools/arena.py                     # arena.yaml を読み込み
+#   python tools/arena.py --config my.yaml    # 指定ファイルを読み込み
+#   python tools/arena.py --iterations 10     # iterations だけ上書き
+#   python tools/arena.py --dry-run           # 設定を表示して終了
+#   python tools/arena.py --clean-start       # データリセット（best.*は保持）
+
+# ── エンジン設定 ──────────────────────────────────────
+# 使うエンジンだけ記述。最低2つ必要。
+engines:
+  alpha:
+    exe: build/kishi-to-alpha
+    model: best.onnx           # ONNXモデルパス
+    simulations: 400
+    batch_size: 16
+    device: auto               # auto / cuda / cuda:0 / cpu
+
+  nnue:
+    exe: build/kishi-to-nnue
+    weights: best.bin           # NNUEバイナリ重みパス
+    hash: 256                   # ハッシュテーブル (MB)
+    threads: 2                  # 探索スレッド数
+
+  mcts:
+    exe: build/kishi-to
+    model: nn_model.onnx
+    simulations: 800
+    device: auto
+
+  classic:
+    exe: build/kishi-to-classic
+    threads: 1
+    # weights: linear.weights   # 線形重み（省略可）
+    # mlp_weights: mlp.weights  # MLP重み（省略可）
+
+# ── Arena設定 ─────────────────────────────────────────
+arena:
+  iterations: 50               # 総イテレーション数
+  games_per_round: 20          # 1イテレーションあたりの対局数
+  movetime: 500                # 1手あたりの持ち時間 (ms)
+  parallel: 1                  # 同時対局数
+  opening_suite: opening_suite.txt  # 序盤集（省略可）
+  work_dir: arena_work
+  elo_gap_threshold: 200       # マッチメイキングのElo差閾値
+
+# ── Gate評価 ──────────────────────────────────────────
+# 新モデルvs旧モデルの検証対局。
+# parallel数はGPU/CPU数から自動決定されるため設定不要。
+gate:
+  threshold: 0.55              # 昇格に必要な勝率
+  games: 40                    # 検証対局数
+  movetime: 500
+
+# ── 自己対戦 ──────────────────────────────────────────
+# Elo中央値以上のエンジンが自己対戦で追加学習。
+selfplay:
+  games: 20                    # 0=無効
+  movetime: 500
+  temperature_drop: 60         # Alpha: 確率的選択を何手目まで行うか
+  multipv: 3                   # NNUE: MultiPV候補手数
+  temperature: 1.5             # NNUE: softmax温度（大きいほどランダム）
+
+# ── 学習設定 ──────────────────────────────────────────
+training:
+  min_positions: 5000          # 学習トリガーの最小局面数
+  imitation_elo_gap: 200       # 敗者が勝者の手を模倣するElo差閾値
+  intensive: false             # 弱エンジンへの集中蒸留学習
