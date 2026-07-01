@@ -85,6 +85,33 @@ MAX_MOVES = 256
 MOVE_TIMEOUT = 60
 
 
+def detect_hardware() -> tuple[int, int]:
+    """Auto-detect CPU cores and GPU count.
+
+    Returns (cpu_cores, gpu_count).
+    """
+    cpu_cores = os.cpu_count() or 4
+    gpu_count = 0
+    gpu_names: list[str] = []
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            gpu_names = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+            gpu_count = len(gpu_names)
+    except Exception:
+        pass
+    if gpu_count > 0:
+        print(f"  Hardware: {cpu_cores} CPU cores, {gpu_count} GPUs "
+              f"({', '.join(gpu_names)})", file=sys.stderr)
+    else:
+        print(f"  Hardware: {cpu_cores} CPU cores, no GPU detected",
+              file=sys.stderr)
+    return cpu_cores, gpu_count
+
+
 # ---------------------------------------------------------------------------
 # Unified USI engine wrapper
 # ---------------------------------------------------------------------------
@@ -1204,6 +1231,27 @@ def train_and_gate_mcts(work_dir: Path, engine: ArenaEngine, iteration: int,
 # Self-play training for top engines (Feature A)
 # ---------------------------------------------------------------------------
 
+def _merge_alpha_npz(paths: list[Path], output: Path):
+    """Merge multiple Alpha self-play npz files into one."""
+    all_encoded, all_policy, all_wdl = [], [], []
+    for p in paths:
+        if not p.exists():
+            continue
+        data = np.load(str(p))
+        if "encoded" in data:
+            all_encoded.append(data["encoded"])
+            all_policy.append(data["policy_target"])
+            all_wdl.append(data["wdl_target"])
+    if not all_encoded:
+        return
+    np.savez(
+        str(output),
+        encoded=np.concatenate(all_encoded),
+        policy_target=np.concatenate(all_policy),
+        wdl_target=np.concatenate(all_wdl),
+    )
+
+
 def self_play_and_train_alpha(
     work_dir: Path,
     engine: ArenaEngine,
@@ -1214,8 +1262,10 @@ def self_play_and_train_alpha(
     gate_threshold: float,
     gate_parallel: int = 1,
     opening_suite: list[str] | None = None,
+    gpu_count: int = 1,
+    temperature_drop: int = 60,
 ) -> bool:
-    """Run Alpha self-play games, train, and gate."""
+    """Run Alpha self-play with parallel GPU workers and diversity."""
     data_dir = work_dir / "alpha" / "data"
     model_dir = work_dir / "alpha" / "models"
 
@@ -1224,34 +1274,92 @@ def self_play_and_train_alpha(
         print("  Alpha self-play: no best model, skipping", file=sys.stderr)
         return False
 
-    data_path = data_dir / f"selfplay_{iteration:04d}.npz"
     model_str = str(best_onnx.resolve())
     simulations = engine.options.get("MctsSimulations", "400")
     batch_size = engine.options.get("MctsBatchSize", "16")
-    device = engine.options.get("NNDevice", "auto")
 
-    sp_cmd = [
-        sys.executable, "tools/alpha_self_play.py",
-        "--engine", str(Path(engine.exe_path).resolve()),
-        "--model", model_str,
-        "--games", str(num_games),
-        "--simulations", simulations,
-        "--batch-size", batch_size,
-        "--movetime", "1000",
-        "--output", str(data_path),
-    ]
-    if device and device != "auto":
-        sp_cmd += ["--device", device]
+    workers = max(1, min(num_games, gpu_count))
+    games_per_worker = (num_games + workers - 1) // workers
 
-    if run_cmd(sp_cmd, f"Alpha self-play ({num_games} games, iter {iteration})") != 0:
-        return False
-    if not data_path.exists():
+    print(f"  Alpha self-play: {num_games} games, {workers} workers "
+          f"(temperature_drop={temperature_drop})", file=sys.stderr)
+
+    data_paths: list[Path] = []
+    procs: list[subprocess.Popen] = []
+
+    for w in range(workers):
+        n = min(games_per_worker, num_games - w * games_per_worker)
+        if n <= 0:
+            break
+        data_path = data_dir / f"selfplay_{iteration:04d}_w{w}.npz"
+        data_paths.append(data_path)
+
+        device = f"cuda:{w}" if gpu_count > 1 else "auto"
+
+        cmd = [
+            sys.executable, "tools/alpha_self_play.py",
+            "--engine", str(Path(engine.exe_path).resolve()),
+            "--model", model_str,
+            "--games", str(n),
+            "--simulations", simulations,
+            "--batch-size", batch_size,
+            "--movetime", "1000",
+            "--output", str(data_path),
+            "--temperature-drop", str(temperature_drop),
+        ]
+        if device != "auto":
+            cmd += ["--device", device]
+
+        print(f"    worker {w}: {n} games on {device}", file=sys.stderr)
+        proc = subprocess.Popen(cmd)
+        procs.append(proc)
+
+    for proc in procs:
+        proc.wait()
+
+    merged_path = data_dir / f"selfplay_{iteration:04d}.npz"
+    if workers > 1:
+        _merge_alpha_npz(data_paths, merged_path)
+        for p in data_paths:
+            if p != merged_path and p.exists():
+                p.unlink()
+    elif data_paths and data_paths[0].exists():
+        data_paths[0].rename(merged_path)
+
+    if not merged_path.exists():
         return False
 
     return train_and_gate_alpha(
         work_dir, engine, iteration,
         gate_games, gate_movetime, gate_threshold, gate_parallel, opening_suite,
     )
+
+
+def _mcts_selfplay_worker(
+    worker_id: int,
+    game_indices: list[int],
+    exe_path: str,
+    options: dict,
+    movetime: int,
+) -> tuple[list[dict], list[str]]:
+    """Worker: play MCTS self-play games with a dedicated engine pair."""
+    e1 = ArenaEngine(f"mcts_sp{worker_id}a", exe_path, "mcts", dict(options))
+    e2 = ArenaEngine(f"mcts_sp{worker_id}b", exe_path, "mcts", dict(options))
+    e1.start()
+    e2.start()
+    positions: list[dict] = []
+    summaries: list[str] = []
+    try:
+        for i, gi in enumerate(game_indices):
+            record = play_arena_game(e1, e2, movetime)
+            positions.extend(record["mcts_positions"])
+            summaries.append(
+                f"  MCTS SP w{worker_id} game {gi+1}: {record['result']} "
+                f"({record['ply_count']}mv, {len(record['mcts_positions'])} pos)")
+    finally:
+        e1.quit()
+        e2.quit()
+    return positions, summaries
 
 
 def self_play_and_train_mcts(
@@ -1265,8 +1373,9 @@ def self_play_and_train_mcts(
     gate_threshold: float,
     gate_parallel: int = 1,
     opening_suite: list[str] | None = None,
+    gpu_count: int = 1,
 ) -> bool:
-    """Run MCTS self-play, collect positions, train, and gate."""
+    """Run MCTS self-play with parallel GPU workers, train, and gate."""
     data_dir = work_dir / "mcts" / "data"
     model_dir = work_dir / "mcts" / "models"
 
@@ -1275,26 +1384,52 @@ def self_play_and_train_mcts(
         print("  MCTS self-play: no best model, skipping", file=sys.stderr)
         return False
 
-    from csa_parser import move_to_index
-    from nnue_self_play import parse_usi_move
+    workers = max(1, min(num_games, gpu_count))
+    games_per_worker = (num_games + workers - 1) // workers
 
-    e1 = ArenaEngine("mcts_sp1", engine.exe_path, "mcts", dict(engine.options))
-    e2 = ArenaEngine("mcts_sp2", engine.exe_path, "mcts", dict(engine.options))
-    e1.start()
-    e2.start()
+    chunks: list[list[int]] = []
+    for w in range(workers):
+        start = w * games_per_worker
+        end = min(start + games_per_worker, num_games)
+        if start < end:
+            chunks.append(list(range(start, end)))
+
+    print(f"  MCTS self-play: {num_games} games, {len(chunks)} workers",
+          file=sys.stderr)
 
     all_positions: list[dict] = []
-    try:
-        for gi in range(num_games):
-            record = play_arena_game(e1, e2, movetime)
-            all_positions.extend(record["mcts_positions"])
-            result_str = record["result"]
-            print(f"  MCTS self-play {gi+1}/{num_games}: {result_str} "
-                  f"({record['ply_count']}mv, {len(record['mcts_positions'])} pos)",
-                  file=sys.stderr)
-    finally:
-        e1.quit()
-        e2.quit()
+
+    if len(chunks) == 1:
+        positions, summaries = _mcts_selfplay_worker(
+            0, chunks[0], engine.exe_path, engine.options, movetime)
+        all_positions.extend(positions)
+        for s in summaries:
+            print(s, file=sys.stderr)
+    else:
+        worker_opts: list[dict] = []
+        for w in range(len(chunks)):
+            opts = dict(engine.options)
+            if gpu_count > 1:
+                opts["NNDevice"] = f"cuda:{w}"
+            worker_opts.append(opts)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+            futures = {
+                executor.submit(
+                    _mcts_selfplay_worker, w, chunk,
+                    engine.exe_path, worker_opts[w], movetime,
+                ): w
+                for w, chunk in enumerate(chunks)
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                w = futures[fut]
+                try:
+                    positions, summaries = fut.result()
+                    all_positions.extend(positions)
+                    for s in summaries:
+                        print(s, file=sys.stderr)
+                except Exception as e:
+                    print(f"  MCTS SP worker {w} error: {e}", file=sys.stderr)
 
     if not all_positions:
         print("  MCTS self-play: no positions collected", file=sys.stderr)
@@ -1413,6 +1548,265 @@ def _distill_to_nnue(
 
 
 # ---------------------------------------------------------------------------
+# NNUE self-play with MultiPV + softmax
+# ---------------------------------------------------------------------------
+
+def _nnue_go_multipv(
+    engine: ArenaEngine,
+    pos_cmd: str,
+    movetime: int,
+) -> list[tuple[str, int]]:
+    """Send go and parse MultiPV results.
+
+    Returns list of (move, cp) sorted by multipv index, from deepest depth.
+    """
+    with engine._lock:
+        engine._lines.clear()
+    engine._send(pos_cmd)
+    engine._send(f"go movetime {movetime}")
+    lines = engine._wait_for("bestmove", timeout=movetime // 1000 + MOVE_TIMEOUT)
+
+    candidates: dict[int, tuple[str, int]] = {}
+    best_depth = 0
+    bestmove = "resign"
+    last_cp = None
+
+    for line in lines:
+        if line.startswith("bestmove"):
+            parts = line.split()
+            bestmove = parts[1] if len(parts) >= 2 else "resign"
+        elif line.startswith("info") and "score" in line:
+            m_depth = re.search(r"depth (\d+)", line)
+            m_mpv = re.search(r"multipv (\d+)", line)
+            m_pv = re.search(r" pv (\S+)", line)
+            m_cp = re.search(r"score cp (-?\d+)", line)
+            m_mate = re.search(r"score mate (-?\d+)", line)
+
+            cp = None
+            if m_cp:
+                cp = int(m_cp.group(1))
+            elif m_mate:
+                cp = 30000 if int(m_mate.group(1)) > 0 else -30000
+
+            if cp is not None:
+                last_cp = cp
+
+            if not m_mpv or not m_pv or cp is None:
+                continue
+
+            depth = int(m_depth.group(1)) if m_depth else 0
+            mpv_idx = int(m_mpv.group(1))
+            move = m_pv.group(1)
+
+            if depth > best_depth:
+                best_depth = depth
+                candidates.clear()
+            if depth == best_depth:
+                candidates[mpv_idx] = (move, cp)
+
+    if not candidates:
+        if bestmove not in ("resign", "none", None):
+            return [(bestmove, last_cp if last_cp is not None else 0)]
+        return []
+
+    return [(move, cp) for _, (move, cp) in sorted(candidates.items())]
+
+
+def _softmax_select(
+    candidates: list[tuple[str, int]],
+    temperature: float = 1.5,
+) -> tuple[str, int]:
+    """Select a move from candidates using softmax over cp values."""
+    if len(candidates) <= 1:
+        return candidates[0] if candidates else ("resign", 0)
+    cps = np.array([cp for _, cp in candidates], dtype=np.float64)
+    logits = cps / (temperature * 100.0)
+    logits -= logits.max()
+    probs = np.exp(logits) / np.exp(logits).sum()
+    idx = np.random.choice(len(candidates), p=probs)
+    return candidates[idx]
+
+
+_NNUE_OPENING_BLACK = ["7g7f", "2g2f", "5g5f", "6g6f", "3g3f"]
+_NNUE_OPENING_WHITE = ["3c3d", "8c8d", "5c5d", "4c4d", "7c7d"]
+
+
+def _play_nnue_selfplay_game(
+    engine: ArenaEngine,
+    movetime: int,
+    multipv: int = 3,
+    temperature: float = 1.5,
+    random_plies: int = 4,
+) -> list[dict]:
+    """Play one NNUE self-play game with MultiPV + softmax move selection."""
+    engine.new_game()
+    board = make_startpos()
+    moves: list[str] = []
+    samples: list[dict] = []
+
+    for ply in range(MAX_MOVES):
+        pos_cmd = "position startpos"
+        if moves:
+            pos_cmd += " moves " + " ".join(moves)
+
+        if ply < random_plies:
+            if ply == 0:
+                bestmove = random.choice(_NNUE_OPENING_BLACK)
+            elif ply == 1:
+                bestmove = random.choice(_NNUE_OPENING_WHITE)
+            else:
+                candidates = _nnue_go_multipv(engine, pos_cmd, 50)
+                if not candidates:
+                    break
+                bestmove, _ = _softmax_select(candidates, temperature=3.0)
+            if bestmove in ("resign", "none"):
+                break
+            try:
+                apply_usi_move(board, bestmove)
+            except Exception:
+                break
+            moves.append(bestmove)
+            continue
+
+        candidates = _nnue_go_multipv(engine, pos_cmd, movetime)
+        if not candidates:
+            break
+
+        chosen_move, chosen_cp = _softmax_select(candidates, temperature)
+
+        if chosen_move in ("resign", "none"):
+            break
+        if chosen_cp is not None and chosen_cp <= RESIGN_THRESHOLD:
+            break
+
+        bf, wf = extract_features_from_board(board)
+        if bf and wf and chosen_cp is not None:
+            samples.append({
+                "black_feats": np.array(bf, dtype=np.int32),
+                "white_feats": np.array(wf, dtype=np.int32),
+                "side_black": board.side == 1,
+                "soft_label": float(cp_to_label(chosen_cp, False)),
+                "ply": ply,
+            })
+
+        try:
+            apply_usi_move(board, chosen_move)
+        except Exception:
+            break
+        moves.append(chosen_move)
+
+        if detect_repetition(moves):
+            break
+
+    return samples
+
+
+def _nnue_selfplay_worker(
+    worker_id: int,
+    game_indices: list[int],
+    exe_path: str,
+    options: dict,
+    movetime: int,
+    multipv: int,
+    temperature: float,
+) -> list[dict]:
+    """Worker: play several NNUE self-play games with a dedicated engine."""
+    engine = ArenaEngine(f"nnue_sp_{worker_id}", exe_path, "nnue", dict(options))
+    engine.start()
+    all_samples: list[dict] = []
+    try:
+        for i, gi in enumerate(game_indices):
+            samples = _play_nnue_selfplay_game(
+                engine, movetime, multipv, temperature)
+            all_samples.extend(samples)
+            if (i + 1) % 5 == 0 or i == len(game_indices) - 1:
+                print(f"  [NNUE SP w{worker_id}] {i+1}/{len(game_indices)} games, "
+                      f"{len(all_samples)} samples", file=sys.stderr)
+    finally:
+        engine.quit()
+    return all_samples
+
+
+def self_play_and_train_nnue(
+    work_dir: Path,
+    engine: ArenaEngine,
+    iteration: int,
+    num_games: int,
+    movetime: int,
+    gate_games: int,
+    gate_movetime: int,
+    gate_threshold: float,
+    gate_parallel: int = 1,
+    opening_suite: list[str] | None = None,
+    cpu_cores: int = 4,
+    multipv: int = 3,
+    temperature: float = 1.5,
+) -> bool:
+    """Run NNUE self-play with MultiPV+softmax, train, and gate."""
+    data_dir = work_dir / "nnue" / "data"
+    model_dir = work_dir / "nnue" / "models"
+
+    best_bin = model_dir / "best.bin"
+    if not best_bin.exists():
+        print("  NNUE self-play: no best model, skipping", file=sys.stderr)
+        return False
+
+    nnue_threads = int(engine.options.get("Threads", "1"))
+    total_hash = int(engine.options.get("Hash", "256"))
+    workers = max(1, min(num_games, cpu_cores // max(2, nnue_threads * 2)))
+    hash_per_worker = max(16, total_hash // workers)
+
+    opts = dict(engine.options)
+    opts["MultiPV"] = str(multipv)
+    opts["Hash"] = str(hash_per_worker)
+    opts["Threads"] = str(nnue_threads)
+
+    games_per_worker = (num_games + workers - 1) // workers
+    chunks: list[list[int]] = []
+    for w in range(workers):
+        start = w * games_per_worker
+        end = min(start + games_per_worker, num_games)
+        if start < end:
+            chunks.append(list(range(start, end)))
+
+    print(f"  NNUE self-play: {num_games} games, {len(chunks)} workers "
+          f"(hash={hash_per_worker}MB/worker, MultiPV={multipv}, "
+          f"temp={temperature})", file=sys.stderr)
+
+    all_samples: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+        futures = {
+            executor.submit(
+                _nnue_selfplay_worker, w, chunk,
+                engine.exe_path, opts, movetime, multipv, temperature,
+            ): w
+            for w, chunk in enumerate(chunks)
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            w = futures[fut]
+            try:
+                samples = fut.result()
+                all_samples.extend(samples)
+                print(f"  NNUE SP worker {w}: {len(samples)} samples",
+                      file=sys.stderr)
+            except Exception as e:
+                print(f"  NNUE SP worker {w} error: {e}", file=sys.stderr)
+
+    if not all_samples:
+        print("  NNUE self-play: no samples collected", file=sys.stderr)
+        return False
+
+    data_path = str(data_dir / f"selfplay_{iteration:04d}.npz")
+    save_nnue_data(all_samples, data_path)
+    print(f"  NNUE self-play: saved {len(all_samples)} samples", file=sys.stderr)
+
+    return train_and_gate_nnue(
+        work_dir, engine, iteration,
+        gate_games, gate_movetime, gate_threshold, gate_parallel, opening_suite,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -1470,6 +1864,12 @@ def main():
                         help="Self-play movetime (ms)")
     parser.add_argument("--intensive-training", action="store_true",
                         help="Intensively train weak engines via distillation each iteration")
+    parser.add_argument("--selfplay-temperature-drop", type=int, default=60,
+                        help="Alpha temperature_drop for self-play diversity (default: 60)")
+    parser.add_argument("--selfplay-multipv", type=int, default=3,
+                        help="NNUE MultiPV candidates for self-play (default: 3)")
+    parser.add_argument("--selfplay-temperature", type=float, default=1.5,
+                        help="NNUE softmax temperature for self-play (default: 1.5)")
     parser.add_argument("--clean-start", action="store_true",
                         help="Delete work-dir and start fresh (Elo 1500, no data)")
 
@@ -1554,6 +1954,8 @@ def main():
 
     engine_names = list(engines.keys())
     n_parallel = max(1, args.parallel)
+
+    cpu_cores, gpu_count = detect_hardware()
 
     print(f"Arena: {', '.join(engine_names)}", file=sys.stderr)
     print(f"  iterations={args.iterations}, games/round={args.games_per_round}, "
@@ -1961,7 +2363,9 @@ def main():
                             args.selfplay_games,
                             args.gate_games, args.gate_movetime,
                             args.gate_threshold, args.gate_parallel_gpu,
-                            opening_suite)
+                            opening_suite,
+                            gpu_count=gpu_count,
+                            temperature_drop=args.selfplay_temperature_drop)
                         trained["alpha_sp"] = "promoted" if promoted else "rejected"
                     elif eng.engine_type == "mcts":
                         print(f"  Self-play mcts ({args.selfplay_games} games)...",
@@ -1971,8 +2375,23 @@ def main():
                             args.selfplay_games, args.selfplay_movetime,
                             args.gate_games, args.gate_movetime,
                             args.gate_threshold, args.gate_parallel_gpu,
-                            opening_suite)
+                            opening_suite,
+                            gpu_count=gpu_count)
                         trained["mcts_sp"] = "promoted" if promoted else "rejected"
+                    elif eng.engine_type == "nnue":
+                        print(f"  Self-play nnue ({args.selfplay_games} games, "
+                              f"MultiPV={args.selfplay_multipv})...",
+                              file=sys.stderr)
+                        promoted = self_play_and_train_nnue(
+                            work_dir, eng, iteration + 1,
+                            args.selfplay_games, args.selfplay_movetime,
+                            args.gate_games, args.gate_movetime,
+                            args.gate_threshold, args.gate_parallel_cpu,
+                            opening_suite,
+                            cpu_cores=cpu_cores,
+                            multipv=args.selfplay_multipv,
+                            temperature=args.selfplay_temperature)
+                        trained["nnue_sp"] = "promoted" if promoted else "rejected"
 
             # --- Feature B: Intensive distillation for weak engines ---
             if args.intensive_training and iter_game_records:
