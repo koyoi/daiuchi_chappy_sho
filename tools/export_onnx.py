@@ -36,6 +36,7 @@ def main():
     state = torch.load(args.model, map_location="cpu", weights_only=False)
     model.load_state_dict(state)
     model.eval()
+    model.freeze_rel_bias()
 
     params = sum(p.numel() for p in model.parameters())
     print(f"Model: {args.model} ({params:,} params)", file=sys.stderr)

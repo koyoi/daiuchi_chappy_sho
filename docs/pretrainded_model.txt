@@ -1,0 +1,36 @@
+# 1. 先にリセット
+python tools/arena.py --work-dir arena_work --clean-start --alpha-engine x --classic-engine x 2>/dev/null; true
+
+# 2. その後モデルをコピー
+cp alpha_model.pt arena_work/alpha/models/best.pt
+cp alpha_model.onnx arena_work/alpha/models/best.onnx
+cp nn_model.pt arena_work/mcts/models/best.pt
+cp nn_model.onnx arena_work/mcts/models/best.onnx
+cp nnue_model.pt arena_work/nnue/models/best.pt
+cp nnue.bin arena_work/nnue/models/best.bin
+
+# 3. clean-start なしで実行
+python tools/arena.py \
+  --alpha-engine build/kishi-to-alpha \
+  --alpha-model arena_work/alpha/models/best.onnx \
+  --alpha-simulations 3200 \
+  --alpha-batch-size 32 \
+  --alpha-device cuda:0 \
+  --mcts-engine build/kishi-to \
+  --mcts-model arena_work/mcts/models/best.onnx \
+  --mcts-simulations 3200 \
+  --mcts-device cuda:1 \
+  --nnue-engine build/kishi-to-nnue \
+  --nnue-weights arena_work/nnue/models/best.bin \
+  --nnue-hash 512 \
+  --nnue-threads 8 \
+  --classic-engine build/kishi-to-classic \
+  --classic-threads 8 \
+  --movetime 1000 \
+  --games-per-round 40 \
+  --iterations 100 \
+  --parallel 8 \
+  --min-train-positions 3000 \
+  --gate-games 10 \
+  --gate-movetime 500 \
+  --work-dir arena_work

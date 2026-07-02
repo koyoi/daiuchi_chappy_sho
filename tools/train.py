@@ -125,13 +125,16 @@ def build_model(nn, d_model=128, nhead=8, num_layers=4, dim_ff=512):
 
         def _build_rel_bias(self):
             B2B = self.rel_bias_table[:, self.rel_rank_idx, self.rel_file_idx]
-            H = 2 * HAND_TYPES
             bias = B2B.new_zeros(self.nhead, seq_len, seq_len)
             bias[:, :BOARD_SQUARES, :BOARD_SQUARES] = B2B
             bias[:, :BOARD_SQUARES, BOARD_SQUARES:] = self.board_hand_bias.unsqueeze(-1).unsqueeze(-1)
             bias[:, BOARD_SQUARES:, :BOARD_SQUARES] = self.hand_board_bias.unsqueeze(-1).unsqueeze(-1)
             bias[:, BOARD_SQUARES:, BOARD_SQUARES:] = self.hand_hand_bias.unsqueeze(-1).unsqueeze(-1)
             return bias
+
+        def freeze_rel_bias(self):
+            """Pre-compute rel_bias as a buffer for ONNX export (avoids advanced indexing)."""
+            self.register_buffer('_frozen_rel_bias', self._build_rel_bias().detach())
 
         def forward(self, board_tokens, hand_tokens, side_token,
                     own_atk=None, opp_atk=None):
@@ -157,7 +160,10 @@ def build_model(nn, d_model=128, nhead=8, num_layers=4, dim_ff=512):
             seq = torch.cat([board_emb, hand_emb], dim=1)
             seq = seq + self.side_embed(side_token).unsqueeze(1)
 
-            rel_bias = self._build_rel_bias()
+            if hasattr(self, '_frozen_rel_bias'):
+                rel_bias = self._frozen_rel_bias
+            else:
+                rel_bias = self._build_rel_bias()
             for layer in self.layers:
                 seq = layer(seq, rel_bias)
 
@@ -469,17 +475,33 @@ def compute_bootstrap_labels(evals, game_result_t, game_slices, torch_mod,
 def train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t,
                 torch_mod, nn, device, epochs: int, batch_size: int, lr: float,
                 resumed: bool = False, loser_policy_weight: float = 0.1,
-                round_number: int = 1, policy_weight_t=None):
-    """Train the model on the given data."""
+                round_number: int = 1, policy_weight_t=None,
+                patience: int = 0):
+    """Train the model on the given data.
+
+    patience: early stop after this many epochs without val loss improvement (0=disabled).
+    """
     model.train()
     round_decay = 0.95 ** (round_number - 1) if resumed else 1.0
     max_lr = lr * max(round_decay, 0.1)
-    optimizer = torch_mod.optim.AdamW(model.parameters(), lr=max_lr, weight_decay=1e-4)
 
     n = board_t.shape[0]
-    total_batches = (n + batch_size - 1) // batch_size
-    total_steps = total_batches * epochs
+    val_frac = 0.05 if n >= 100000 else 0.0
+    n_val = int(n * val_frac)
+    n_train = n - n_val
 
+    if n_val > 0:
+        all_perm = torch_mod.randperm(n)
+        val_idx = all_perm[:n_val]
+        train_idx = all_perm[n_val:]
+    else:
+        train_idx = torch_mod.arange(n)
+        val_idx = None
+
+    train_batches = (n_train + batch_size - 1) // batch_size
+    total_steps = train_batches * epochs
+
+    optimizer = torch_mod.optim.AdamW(model.parameters(), lr=max_lr, weight_decay=1e-4)
     scheduler = torch_mod.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=max_lr,
@@ -508,20 +530,28 @@ def train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, p
     init_lr = max_lr / 10
     min_lr = init_lr / 100
     mode = "fine-tune" if resumed else "fresh"
-    print(f"Training ({mode} R{round_number}): {n} samples ({n_positive}+/{n_negative}-), "
+    val_str = f", val={n_val}" if n_val > 0 else ""
+    patience_str = f", patience={patience}" if patience > 0 else ""
+    print(f"Training ({mode} R{round_number}): {n_train} train{val_str} samples "
+          f"({n_positive}+/{n_negative}-), "
           f"{epochs} epochs, batch={batch_size}, "
           f"lr={init_lr:.2e}→{max_lr:.2e}→{min_lr:.2e}, "
-          f"{pw_desc}",
+          f"{pw_desc}{patience_str}",
           file=sys.stderr)
+
+    best_val_loss = float('inf')
+    best_state = None
+    stale_epochs = 0
 
     for epoch in range(epochs):
         t0 = time.time()
-        perm = torch_mod.randperm(n)
+        perm = train_idx[torch_mod.randperm(n_train)]
         total_loss_v = 0.0
         total_loss_p = 0.0
         batches = 0
 
-        for start in range(0, n, batch_size):
+        model.train()
+        for start in range(0, n_train, batch_size):
             idx = perm[start:start + batch_size]
             b_board = board_t[idx].to(device, non_blocking=True)
             b_hand = hand_t[idx].to(device, non_blocking=True)
@@ -548,7 +578,7 @@ def train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, p
             total_loss_p += loss_p.item()
             batches += 1
 
-            pct = batches * 100 // total_batches
+            pct = batches * 100 // train_batches
             filled = pct // 5
             bar = "=" * filled + ">" * (1 if filled < 20 else 0) + " " * (20 - filled - (1 if filled < 20 else 0))
             avg_v_so_far = total_loss_v / batches
@@ -561,9 +591,49 @@ def train_model(model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, p
         avg_v = total_loss_v / batches
         avg_p = total_loss_p / batches
         current_lr = optimizer.param_groups[0]['lr']
+
+        val_str = ""
+        if val_idx is not None:
+            model.eval()
+            val_v_total = 0.0
+            val_p_total = 0.0
+            val_batches = 0
+            with torch_mod.no_grad():
+                for vs in range(0, n_val, batch_size):
+                    vi = val_idx[vs:vs + batch_size]
+                    pv, pp = model(
+                        board_t[vi].to(device), hand_t[vi].to(device),
+                        side_t[vi].to(device), own_atk_t[vi].to(device),
+                        opp_atk_t[vi].to(device))
+                    val_v_total += value_loss_fn(pv, value_t[vi].to(device)).item()
+                    val_p_total += policy_loss_fn(pp, policy_t[vi].to(device)).mean().item()
+                    val_batches += 1
+            val_v = val_v_total / val_batches
+            val_p = val_p_total / val_batches
+            val_loss = val_v + val_p
+            val_str = f" | val: v={val_v:.4f} p={val_p:.4f}"
+
+            if patience > 0:
+                if val_loss < best_val_loss - 1e-4:
+                    best_val_loss = val_loss
+                    save_m = model.module if hasattr(model, 'module') else model
+                    best_state = {k: v.clone() for k, v in save_m.state_dict().items()}
+                    stale_epochs = 0
+                else:
+                    stale_epochs += 1
+
         print(f"\r  epoch {epoch + 1}/{epochs}: "
               f"value_loss={avg_v:.4f} policy_loss={avg_p:.4f} "
-              f"lr={current_lr:.6f} ({elapsed:.1f}s)          ", file=sys.stderr)
+              f"lr={current_lr:.6f}{val_str} ({elapsed:.1f}s)          ", file=sys.stderr)
+
+        if patience > 0 and stale_epochs >= patience:
+            print(f"  Early stop: no improvement for {patience} epochs", file=sys.stderr)
+            break
+
+    if best_state is not None:
+        save_m = model.module if hasattr(model, 'module') else model
+        save_m.load_state_dict(best_state)
+        print(f"  Restored best val checkpoint (loss={best_val_loss:.4f})", file=sys.stderr)
 
     return avg_v, avg_p
 
@@ -604,6 +674,8 @@ def main():
                         help="Blend: 0=model eval only, 1=game result only (default: 0.5)")
     parser.add_argument("--drop-margin", type=float, default=0.8,
                         help="eval_drop at which policy weight reaches min (default: 0.8)")
+    parser.add_argument("--patience", type=int, default=0,
+                        help="Early stop after N epochs without val loss improvement (0=disabled)")
     args = parser.parse_args()
 
     torch_mod, nn = import_torch()
@@ -653,8 +725,8 @@ def main():
             model.load_state_dict(state)
             resumed = True
             print(f"Resumed from {model_path}", file=sys.stderr)
-        except RuntimeError as e:
-            print(f"WARNING: could not resume (architecture mismatch), training from scratch: {e}",
+        except RuntimeError:
+            print(f"Resume: architecture mismatch, training from scratch",
                   file=sys.stderr)
             model = build_model(nn).to(device)
 
@@ -693,13 +765,14 @@ def main():
                 value_t, policy_t, torch_mod, nn, device,
                 args.epochs, args.batch_size, effective_lr,
                 resumed=is_bootstrap_round, round_number=round_num,
-                policy_weight_t=pw_t)
+                policy_weight_t=pw_t, patience=args.patience)
     else:
         # Train (original behavior)
         final_vloss, final_ploss = train_model(
             model, board_t, hand_t, side_t, own_atk_t, opp_atk_t, value_t, policy_t,
             torch_mod, nn, device, args.epochs, args.batch_size, effective_lr,
-            resumed=resumed, round_number=args.round)
+            resumed=resumed, round_number=args.round,
+            patience=args.patience)
 
     # Summary to stdout (parsed by train_loop.py)
     print(f"value_loss={final_vloss:.4f} policy_loss={final_ploss:.4f}")
@@ -719,6 +792,7 @@ def main():
     print(f"Exporting ONNX to {onnx_path}...", file=sys.stderr)
     save_model = save_model.cpu()
     save_model.eval()
+    save_model.freeze_rel_bias()
     batch_size = 1
     board_dummy = torch_mod.zeros(batch_size, 81, dtype=torch_mod.long)
     hand_dummy = torch_mod.zeros(batch_size, 14, dtype=torch_mod.long)

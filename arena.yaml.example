@@ -17,18 +17,21 @@ engines:
     simulations: 400
     batch_size: 16
     device: auto               # auto / cuda / cuda:0 / cpu
+    selfplay_games: 20         # 自己対戦ゲーム数（GPU重い、少なめ）
 
   nnue:
     exe: build/kishi-to-nnue
     weights: best.bin           # NNUEバイナリ重みパス
     hash: 256                   # ハッシュテーブル (MB)
     threads: 2                  # 探索スレッド数
+    selfplay_games: 200        # CPU高速、多めに
 
   mcts:
     exe: build/kishi-to
     model: nn_model.onnx
     simulations: 800
     device: auto
+    selfplay_games: 100        # Transformerはデータ量が必要
 
   classic:
     exe: build/kishi-to-classic

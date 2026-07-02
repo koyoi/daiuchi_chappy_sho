@@ -623,6 +623,28 @@ def save_mcts_data(positions: list[dict], result_map: dict[int, str], path: str)
 # Training & gating
 # ---------------------------------------------------------------------------
 
+def _check_pt_compatible(model_pt: Path, build_fn) -> bool:
+    """Check if a saved .pt state_dict is compatible with the current model."""
+    try:
+        import torch as _torch
+        state = _torch.load(str(model_pt), map_location="cpu", weights_only=False)
+        model = build_fn()
+        model.load_state_dict(state)
+        return True
+    except Exception:
+        return False
+
+
+def _invalidate_stale_baseline(model_dir: Path, label: str):
+    """Remove stale best.pt/best.onnx from an incompatible architecture."""
+    for ext in ("pt", "onnx"):
+        p = model_dir / f"best.{ext}"
+        if p.exists():
+            p.unlink()
+    print(f"  {label}: removed stale baseline (architecture mismatch)",
+          file=sys.stderr)
+
+
 def run_cmd(args: list[str], desc: str) -> int:
     print(f"\n{'='*60}", file=sys.stderr)
     print(f"  {desc}", file=sys.stderr)
@@ -698,29 +720,29 @@ def evaluate_models(
     gate_threshold: float = 0.55,
     parallel: int = 1,
     opening_suite: list[str] | None = None,
+    gpu_count: int = 0,
 ) -> float:
     """Play new vs best model, return win rate for new."""
-    from self_play import USIEngine as SPEngine
-
     n_parallel = max(1, min(parallel, games))
+    uses_gpu = gpu_count > 0 and engine.engine_type in ("alpha", "mcts")
+    n_gpus = max(1, gpu_count) if uses_gpu else 1
+    slot_gpu = [i % n_gpus for i in range(n_parallel)]
+    gpu_load = [0] * n_gpus
 
     engine_pairs: list[tuple] = []
-    for _ in range(n_parallel):
-        e_new = SPEngine(engine.exe_path)
-        e_best = SPEngine(engine.exe_path)
+    for i in range(n_parallel):
+        new_opts = dict(engine.options)
+        new_opts.update(new_model_opts)
+        best_opts = dict(engine.options)
+        best_opts.update(best_model_opts)
+        if uses_gpu:
+            device = f"cuda:{slot_gpu[i]}"
+            new_opts["NNDevice"] = device
+            best_opts["NNDevice"] = device
+        e_new = ArenaEngine(f"gate_new_{i}", engine.exe_path, engine.engine_type, new_opts)
+        e_best = ArenaEngine(f"gate_best_{i}", engine.exe_path, engine.engine_type, best_opts)
         e_new.start()
         e_best.start()
-        for k, v in new_model_opts.items():
-            e_new._send(f"setoption name {k} value {v}")
-        for k, v in best_model_opts.items():
-            e_best._send(f"setoption name {k} value {v}")
-        e_new._send("isready")
-        e_best._send("isready")
-        for eng in (e_new, e_best):
-            while True:
-                line = eng._recv()
-                if line and line.strip() == "readyok":
-                    break
         engine_pairs.append((e_new, e_best))
 
     try:
@@ -755,7 +777,7 @@ def evaluate_models(
                    f"L={losses}(B{losses_as_black}/W{losses_as_white}) "
                    f"D={draws}  WR={wr:.1%}  [{total}/{games}]")
 
-        table = Table(title="Gate Evaluation", show_header=True, expand=True, padding=(0, 1))
+        table = Table(title=f"Gate Evaluation [{engine.name}]", show_header=True, expand=True, padding=(0, 1))
         table.add_column("Slot", style="bold", width=4, justify="center")
         table.add_column("Game", width=8)
         table.add_column("Side", width=6)
@@ -782,7 +804,7 @@ def evaluate_models(
 
         layout = Layout()
         parts = [
-            Layout(Panel(summary, title="Gate Progress", border_style="blue"), size=3),
+            Layout(Panel(summary, title=f"Gate: {engine.name}", border_style="blue"), size=3),
             Layout(table, size=n_parallel + 4),
         ]
         if log_panel:
@@ -848,7 +870,9 @@ def evaluate_models(
             nonlocal games_started
             if games_started >= games or not free_slots or early_stop:
                 return
-            slot = free_slots.pop(0)
+            slot = min(free_slots, key=lambda s: gpu_load[slot_gpu[s]])
+            free_slots.remove(slot)
+            gpu_load[slot_gpu[slot]] += 1
             fut = executor.submit(_play_gate, slot, games_started)
             pending[fut] = slot
             games_started += 1
@@ -860,6 +884,7 @@ def evaluate_models(
             done, _ = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
             for future in done:
                 slot = pending.pop(future)
+                gpu_load[slot_gpu[slot]] -= 1
                 free_slots.append(slot)
                 games_done += 1
                 g, result, new_is_black, ply = future.result()
@@ -1061,7 +1086,8 @@ def train_and_gate_classic(
 def train_and_gate_alpha(work_dir: Path, engine: ArenaEngine, iteration: int,
                          gate_games: int, gate_movetime: int,
                          gate_threshold: float, gate_parallel: int = 1,
-                         opening_suite: list[str] | None = None) -> bool:
+                         opening_suite: list[str] | None = None,
+                         gpu_count: int = 0) -> bool:
     data_dir = work_dir / "alpha" / "data"
     model_dir = work_dir / "alpha" / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -1073,6 +1099,12 @@ def train_and_gate_alpha(work_dir: Path, engine: ArenaEngine, iteration: int,
     best_pt = model_dir / "best.pt"
     candidate_pt = model_dir / f"candidate_{iteration}.pt"
     candidate_onnx = model_dir / f"candidate_{iteration}.onnx"
+
+    if best_pt.exists():
+        from train_alpha import build_model as build_alpha_model
+        import torch.nn as _nn
+        if not _check_pt_compatible(best_pt, lambda: build_alpha_model(_nn)):
+            _invalidate_stale_baseline(model_dir, "Alpha")
 
     train_args = [
         sys.executable, "tools/train_alpha_rl.py",
@@ -1100,6 +1132,7 @@ def train_and_gate_alpha(work_dir: Path, engine: ArenaEngine, iteration: int,
         {"NNModel": str(candidate_onnx.resolve())},
         {"NNModel": str(best_onnx.resolve())},
         gate_games, gate_movetime, gate_threshold, gate_parallel, opening_suite,
+        gpu_count=gpu_count,
     )
     print(f"  Alpha gate: WR={wr:.1%} (threshold={gate_threshold:.1%})", file=sys.stderr)
 
@@ -1131,6 +1164,14 @@ def train_and_gate_nnue(work_dir: Path, engine: ArenaEngine, iteration: int,
     best_bin = model_dir / "best.bin"
     candidate_pt = model_dir / f"candidate_{iteration}.pt"
     candidate_bin = model_dir / f"candidate_{iteration}.bin"
+
+    if best_pt.exists():
+        from train_nnue import NNUEModel
+        if not _check_pt_compatible(best_pt, lambda: NNUEModel()):
+            _invalidate_stale_baseline(model_dir, "NNUE")
+            best_bin = model_dir / "best.bin"
+            if best_bin.exists():
+                best_bin.unlink()
 
     train_args = [
         sys.executable, "tools/train_nnue.py",
@@ -1178,7 +1219,8 @@ def train_and_gate_nnue(work_dir: Path, engine: ArenaEngine, iteration: int,
 def train_and_gate_mcts(work_dir: Path, engine: ArenaEngine, iteration: int,
                         gate_games: int, gate_movetime: int,
                         gate_threshold: float, gate_parallel: int = 1,
-                        opening_suite: list[str] | None = None) -> bool:
+                        opening_suite: list[str] | None = None,
+                        gpu_count: int = 0) -> bool:
     data_dir = work_dir / "mcts" / "data"
     model_dir = work_dir / "mcts" / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -1191,6 +1233,12 @@ def train_and_gate_mcts(work_dir: Path, engine: ArenaEngine, iteration: int,
     best_onnx = model_dir / "best.onnx"
     candidate_pt = model_dir / f"candidate_{iteration}.pt"
     candidate_onnx = model_dir / f"candidate_{iteration}.onnx"
+
+    if best_pt.exists():
+        from train import build_model
+        import torch.nn as _nn
+        if not _check_pt_compatible(best_pt, lambda: build_model(_nn)):
+            _invalidate_stale_baseline(model_dir, "MCTS")
 
     train_args = [
         sys.executable, "tools/train.py",
@@ -1218,6 +1266,7 @@ def train_and_gate_mcts(work_dir: Path, engine: ArenaEngine, iteration: int,
         {"NNModel": str(candidate_onnx.resolve())},
         {"NNModel": str(best_onnx.resolve())},
         gate_games, gate_movetime, gate_threshold, gate_parallel, opening_suite,
+        gpu_count=gpu_count,
     )
     print(f"  MCTS gate: WR={wr:.1%} (threshold={gate_threshold:.1%})", file=sys.stderr)
 
@@ -1236,6 +1285,156 @@ def train_and_gate_mcts(work_dir: Path, engine: ArenaEngine, iteration: int,
 # ---------------------------------------------------------------------------
 # Self-play training for top engines (Feature A)
 # ---------------------------------------------------------------------------
+
+
+class SelfPlayTracker:
+    """Rich progress display for parallel self-play."""
+
+    def __init__(self, engine_name: str, num_games: int, num_workers: int):
+        self.engine_name = engine_name
+        self.num_games = num_games
+        self.num_workers = num_workers
+        self.wins_black = 0
+        self.wins_white = 0
+        self.draws = 0
+        self.positions = 0
+        self.slot_status: list[dict] = [{"state": "idle"} for _ in range(num_workers)]
+        self.completed: list[str] = []
+        self._lock = threading.Lock()
+        self._live = None
+        self._has_rich = False
+
+    def start(self):
+        try:
+            from rich.live import Live
+            from rich.console import Console
+            self._has_rich = True
+            self._live = Live(self._build(), refresh_per_second=4,
+                              console=Console(stderr=True))
+            self._live.start()
+        except ImportError:
+            self._has_rich = False
+
+    def stop(self):
+        if self._live:
+            try:
+                self._live.stop()
+            except Exception:
+                pass
+            self._live = None
+        total = self.wins_black + self.wins_white + self.draws
+        bwr = (self.wins_black / total * 100) if total > 0 else 0
+        print(f"  {self.engine_name} self-play done: {total} games, "
+              f"B:{self.wins_black} W:{self.wins_white} D:{self.draws} "
+              f"(B win {bwr:.1f}%), {self.positions} positions",
+              file=sys.stderr)
+
+    def game_started(self, slot: int, game_idx: int, total_per_worker: int):
+        with self._lock:
+            self.slot_status[slot] = {
+                "state": "playing",
+                "game": f"{game_idx + 1}/{self.num_games}",
+                "ply": 0, "b_eval": "-", "w_eval": "-",
+            }
+            self._refresh()
+
+    def game_done(self, slot: int, game_idx: int, result: str,
+                  ply: int, positions: int):
+        with self._lock:
+            if result == "black":
+                self.wins_black += 1
+            elif result == "white":
+                self.wins_white += 1
+            else:
+                self.draws += 1
+            self.positions += positions
+            total = self.wins_black + self.wins_white + self.draws
+            line = (f"game {game_idx + 1}: {result} ({ply}mv, {positions} pos) "
+                    f"[B:{self.wins_black} W:{self.wins_white} D:{self.draws}]")
+            self.completed.append(line)
+            self.slot_status[slot] = {
+                "state": "done", "result": result, "ply": ply,
+                "game": f"{game_idx + 1}/{self.num_games}",
+            }
+            if not self._has_rich:
+                print(f"  [{self.engine_name} SP] {line}", file=sys.stderr)
+            self._refresh()
+
+    def make_on_move(self, slot: int):
+        def _on_move(ply, move, cp, winner):
+            with self._lock:
+                eval_str = f"{cp:+d}" if cp is not None else "?"
+                is_black_move = (ply % 2 == 1)
+                eval_key = "b_eval" if is_black_move else "w_eval"
+                if winner:
+                    self.slot_status[slot].update({
+                        "state": "done", "ply": ply,
+                        eval_key: eval_str, "result": winner,
+                    })
+                else:
+                    self.slot_status[slot].update({
+                        "ply": ply, eval_key: eval_str,
+                    })
+                self._refresh()
+        return _on_move
+
+    def _build(self):
+        from rich.table import Table
+        from rich.text import Text
+        from rich.panel import Panel
+        from rich.layout import Layout
+
+        total = self.wins_black + self.wins_white + self.draws
+        bwr = (self.wins_black / total * 100) if total > 0 else 0
+        summary = (f"B:{self.wins_black}  W:{self.wins_white}  D:{self.draws}  |  "
+                   f"{self.positions} positions  |  B win {bwr:.1f}%")
+
+        table = Table(show_header=True, expand=True, padding=(0, 1))
+        table.add_column("Slot", style="bold", width=4, justify="center")
+        table.add_column("Game", width=8)
+        table.add_column("Ply", width=5, justify="right")
+        table.add_column("B Eval", width=8, justify="right")
+        table.add_column("W Eval", width=8, justify="right")
+        table.add_column("Status", width=12)
+        for i, ss in enumerate(self.slot_status):
+            if ss["state"] == "idle":
+                table.add_row(str(i + 1), "-", "-", "-", "-",
+                              Text("idle", style="dim"))
+            elif ss["state"] == "done":
+                res = ss.get("result", "draw")
+                style = "green" if res == "black" else (
+                    "yellow" if res == "draw" else "red")
+                table.add_row(str(i + 1), ss.get("game", ""),
+                              str(ss.get("ply", "")),
+                              ss.get("b_eval", ""), ss.get("w_eval", ""),
+                              Text(res, style=style))
+            else:
+                table.add_row(str(i + 1), ss.get("game", ""),
+                              str(ss.get("ply", 0)),
+                              ss.get("b_eval", "-"), ss.get("w_eval", "-"),
+                              Text("playing", style="cyan"))
+
+        recent = "\n".join(self.completed[-self.num_workers * 2:]) if self.completed else ""
+        log_panel = Panel(recent, title="Results", border_style="dim",
+                          expand=True) if recent else None
+
+        layout = Layout()
+        parts = [
+            Layout(Panel(summary,
+                         title=f"{self.engine_name} Self-Play: {total}/{self.num_games}",
+                         border_style="blue"), size=3),
+            Layout(table, size=self.num_workers + 4),
+        ]
+        if log_panel:
+            parts.append(Layout(log_panel,
+                                size=min(self.num_workers * 2 + 3, 8)))
+        layout.split_column(*parts)
+        return layout
+
+    def _refresh(self):
+        if self._has_rich and self._live:
+            self._live.update(self._build())
+
 
 def _merge_alpha_npz(paths: list[Path], output: Path):
     """Merge multiple Alpha self-play npz files into one."""
@@ -1258,11 +1457,39 @@ def _merge_alpha_npz(paths: list[Path], output: Path):
     )
 
 
+def _selfplay_one_game(
+    slot: int,
+    game_idx: int,
+    engine_pairs: list[tuple[ArenaEngine, ArenaEngine]],
+    movetime: int,
+    tracker: SelfPlayTracker,
+    engine_type: str,
+) -> dict:
+    """Play one self-play game on a pre-created engine pair.
+
+    Returns the game record from play_arena_game.
+    """
+    e1, e2 = engine_pairs[slot]
+    tracker.game_started(slot, game_idx, 0)
+    record = play_arena_game(e1, e2, movetime,
+                             on_move=tracker.make_on_move(slot))
+    if engine_type == "alpha":
+        n_pos = len(record["alpha_positions"])
+    elif engine_type == "mcts":
+        n_pos = len(record["mcts_positions"])
+    else:
+        n_pos = 0
+    tracker.game_done(slot, game_idx, record["result"],
+                      record["ply_count"], n_pos)
+    return record
+
+
 def self_play_and_train_alpha(
     work_dir: Path,
     engine: ArenaEngine,
     iteration: int,
     num_games: int,
+    movetime: int,
     gate_games: int,
     gate_movetime: int,
     gate_threshold: float,
@@ -1281,91 +1508,98 @@ def self_play_and_train_alpha(
         return False
 
     model_str = str(best_onnx.resolve())
-    simulations = engine.options.get("MctsSimulations", "400")
-    batch_size = engine.options.get("MctsBatchSize", "16")
+    slots_per_gpu = 2
+    n_gpus = max(1, gpu_count)
+    n_slots = max(1, min(num_games, n_gpus * slots_per_gpu))
+    slot_gpu = [i % n_gpus for i in range(n_slots)]
+    gpu_load = [0] * n_gpus
 
-    workers = max(1, min(num_games, gpu_count))
-    games_per_worker = (num_games + workers - 1) // workers
+    engine_pairs: list[tuple[ArenaEngine, ArenaEngine]] = []
+    for i in range(n_slots):
+        opts = dict(engine.options)
+        opts["TemperatureDropMove"] = str(temperature_drop)
+        opts["NNModel"] = model_str
+        if gpu_count > 0:
+            opts["NNDevice"] = f"cuda:{slot_gpu[i]}"
+        e1 = ArenaEngine(f"alpha_sp{i}a", engine.exe_path, "alpha", dict(opts))
+        e2 = ArenaEngine(f"alpha_sp{i}b", engine.exe_path, "alpha", dict(opts))
+        e1.start()
+        e2.start()
+        engine_pairs.append((e1, e2))
 
-    print(f"  Alpha self-play: {num_games} games, {workers} workers "
-          f"(temperature_drop={temperature_drop})", file=sys.stderr)
+    tracker = SelfPlayTracker("Alpha", num_games, n_slots)
+    tracker.start()
 
-    data_paths: list[Path] = []
-    procs: list[subprocess.Popen] = []
+    all_games: list[tuple[list[dict], str]] = []
+    try:
+        free_slots = list(range(n_slots))
+        games_started = 0
+        games_done = 0
+        pending: dict[concurrent.futures.Future, int] = {}
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=n_slots)
 
-    for w in range(workers):
-        n = min(games_per_worker, num_games - w * games_per_worker)
-        if n <= 0:
-            break
-        data_path = data_dir / f"selfplay_{iteration:04d}_w{w}.npz"
-        data_paths.append(data_path)
+        def _submit():
+            nonlocal games_started
+            if games_started >= num_games or not free_slots:
+                return
+            slot = min(free_slots, key=lambda s: gpu_load[slot_gpu[s]])
+            free_slots.remove(slot)
+            gpu_load[slot_gpu[slot]] += 1
+            fut = executor.submit(_selfplay_one_game, slot, games_started,
+                                  engine_pairs, movetime, tracker, "alpha")
+            pending[fut] = slot
+            games_started += 1
 
-        device = f"cuda:{w}" if gpu_count > 1 else "auto"
+        for _ in range(min(n_slots, num_games)):
+            _submit()
 
-        cmd = [
-            sys.executable, "tools/alpha_self_play.py",
-            "--engine", str(Path(engine.exe_path).resolve()),
-            "--model", model_str,
-            "--games", str(n),
-            "--simulations", simulations,
-            "--batch-size", batch_size,
-            "--movetime", "1000",
-            "--output", str(data_path),
-            "--temperature-drop", str(temperature_drop),
-        ]
-        if device != "auto":
-            cmd += ["--device", device]
+        while games_done < num_games and pending:
+            done, _ = concurrent.futures.wait(
+                pending, return_when=concurrent.futures.FIRST_COMPLETED)
+            for fut in done:
+                slot = pending.pop(fut)
+                gpu_load[slot_gpu[slot]] -= 1
+                free_slots.append(slot)
+                games_done += 1
+                try:
+                    record = fut.result()
+                    all_games.append(
+                        (record["alpha_positions"], record["result"]))
+                except Exception as e:
+                    print(f"  Alpha SP slot {slot} error: {e}",
+                          file=sys.stderr)
+                _submit()
 
-        print(f"    worker {w}: {n} games on {device}", file=sys.stderr)
-        proc = subprocess.Popen(cmd)
-        procs.append(proc)
+        executor.shutdown(wait=True)
+    finally:
+        tracker.stop()
+        for e1, e2 in engine_pairs:
+            e1.quit()
+            e2.quit()
 
-    for proc in procs:
-        proc.wait()
-
-    merged_path = data_dir / f"selfplay_{iteration:04d}.npz"
-    if workers > 1:
-        _merge_alpha_npz(data_paths, merged_path)
-        for p in data_paths:
-            if p != merged_path and p.exists():
-                p.unlink()
-    elif data_paths and data_paths[0].exists():
-        data_paths[0].rename(merged_path)
-
-    if not merged_path.exists():
+    all_positions = [g[0] for g in all_games]
+    all_results = [g[1] for g in all_games]
+    if not any(all_positions):
+        print("  Alpha self-play: no positions collected", file=sys.stderr)
         return False
+
+    arrays = positions_to_arrays(all_positions, all_results)
+    if arrays is None:
+        print("  Alpha self-play: no positions collected", file=sys.stderr)
+        return False
+
+    encoded_arr, policy_arr, wdl_arr = arrays
+    data_path = data_dir / f"selfplay_{iteration:04d}.npz"
+    np.savez(str(data_path), encoded=encoded_arr,
+             policy_target=policy_arr, wdl_target=wdl_arr)
+    print(f"  Alpha self-play: saved {len(encoded_arr)} positions",
+          file=sys.stderr)
 
     return train_and_gate_alpha(
         work_dir, engine, iteration,
         gate_games, gate_movetime, gate_threshold, gate_parallel, opening_suite,
+        gpu_count=gpu_count,
     )
-
-
-def _mcts_selfplay_worker(
-    worker_id: int,
-    game_indices: list[int],
-    exe_path: str,
-    options: dict,
-    movetime: int,
-) -> tuple[list[dict], list[str]]:
-    """Worker: play MCTS self-play games with a dedicated engine pair."""
-    e1 = ArenaEngine(f"mcts_sp{worker_id}a", exe_path, "mcts", dict(options))
-    e2 = ArenaEngine(f"mcts_sp{worker_id}b", exe_path, "mcts", dict(options))
-    e1.start()
-    e2.start()
-    positions: list[dict] = []
-    summaries: list[str] = []
-    try:
-        for i, gi in enumerate(game_indices):
-            record = play_arena_game(e1, e2, movetime)
-            positions.extend(record["mcts_positions"])
-            summaries.append(
-                f"  MCTS SP w{worker_id} game {gi+1}: {record['result']} "
-                f"({record['ply_count']}mv, {len(record['mcts_positions'])} pos)")
-    finally:
-        e1.quit()
-        e2.quit()
-    return positions, summaries
 
 
 def self_play_and_train_mcts(
@@ -1390,52 +1624,71 @@ def self_play_and_train_mcts(
         print("  MCTS self-play: no best model, skipping", file=sys.stderr)
         return False
 
-    workers = max(1, min(num_games, gpu_count))
-    games_per_worker = (num_games + workers - 1) // workers
+    slots_per_gpu = 2
+    n_gpus = max(1, gpu_count)
+    n_slots = max(1, min(num_games, n_gpus * slots_per_gpu))
+    slot_gpu = [i % n_gpus for i in range(n_slots)]
+    gpu_load = [0] * n_gpus
 
-    chunks: list[list[int]] = []
-    for w in range(workers):
-        start = w * games_per_worker
-        end = min(start + games_per_worker, num_games)
-        if start < end:
-            chunks.append(list(range(start, end)))
+    engine_pairs: list[tuple[ArenaEngine, ArenaEngine]] = []
+    for i in range(n_slots):
+        opts = dict(engine.options)
+        if gpu_count > 0:
+            opts["NNDevice"] = f"cuda:{slot_gpu[i]}"
+        e1 = ArenaEngine(f"mcts_sp{i}a", engine.exe_path, "mcts", dict(opts))
+        e2 = ArenaEngine(f"mcts_sp{i}b", engine.exe_path, "mcts", dict(opts))
+        e1.start()
+        e2.start()
+        engine_pairs.append((e1, e2))
 
-    print(f"  MCTS self-play: {num_games} games, {len(chunks)} workers",
-          file=sys.stderr)
+    tracker = SelfPlayTracker("MCTS", num_games, n_slots)
+    tracker.start()
 
     all_positions: list[dict] = []
+    try:
+        free_slots = list(range(n_slots))
+        games_started = 0
+        games_done = 0
+        pending: dict[concurrent.futures.Future, int] = {}
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=n_slots)
 
-    if len(chunks) == 1:
-        positions, summaries = _mcts_selfplay_worker(
-            0, chunks[0], engine.exe_path, engine.options, movetime)
-        all_positions.extend(positions)
-        for s in summaries:
-            print(s, file=sys.stderr)
-    else:
-        worker_opts: list[dict] = []
-        for w in range(len(chunks)):
-            opts = dict(engine.options)
-            if gpu_count > 1:
-                opts["NNDevice"] = f"cuda:{w}"
-            worker_opts.append(opts)
+        def _submit():
+            nonlocal games_started
+            if games_started >= num_games or not free_slots:
+                return
+            slot = min(free_slots, key=lambda s: gpu_load[slot_gpu[s]])
+            free_slots.remove(slot)
+            gpu_load[slot_gpu[slot]] += 1
+            fut = executor.submit(_selfplay_one_game, slot, games_started,
+                                  engine_pairs, movetime, tracker, "mcts")
+            pending[fut] = slot
+            games_started += 1
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as executor:
-            futures = {
-                executor.submit(
-                    _mcts_selfplay_worker, w, chunk,
-                    engine.exe_path, worker_opts[w], movetime,
-                ): w
-                for w, chunk in enumerate(chunks)
-            }
-            for fut in concurrent.futures.as_completed(futures):
-                w = futures[fut]
+        for _ in range(min(n_slots, num_games)):
+            _submit()
+
+        while games_done < num_games and pending:
+            done, _ = concurrent.futures.wait(
+                pending, return_when=concurrent.futures.FIRST_COMPLETED)
+            for fut in done:
+                slot = pending.pop(fut)
+                gpu_load[slot_gpu[slot]] -= 1
+                free_slots.append(slot)
+                games_done += 1
                 try:
-                    positions, summaries = fut.result()
-                    all_positions.extend(positions)
-                    for s in summaries:
-                        print(s, file=sys.stderr)
+                    record = fut.result()
+                    all_positions.extend(record["mcts_positions"])
                 except Exception as e:
-                    print(f"  MCTS SP worker {w} error: {e}", file=sys.stderr)
+                    print(f"  MCTS SP slot {slot} error: {e}",
+                          file=sys.stderr)
+                _submit()
+
+        executor.shutdown(wait=True)
+    finally:
+        tracker.stop()
+        for e1, e2 in engine_pairs:
+            e1.quit()
+            e2.quit()
 
     if not all_positions:
         print("  MCTS self-play: no positions collected", file=sys.stderr)
@@ -1443,11 +1696,13 @@ def self_play_and_train_mcts(
 
     data_path = str(data_dir / f"selfplay_{iteration:04d}.npz")
     save_mcts_data(all_positions, {}, data_path)
-    print(f"  MCTS self-play: saved {len(all_positions)} positions", file=sys.stderr)
+    print(f"  MCTS self-play: saved {len(all_positions)} positions",
+          file=sys.stderr)
 
     return train_and_gate_mcts(
         work_dir, engine, iteration,
         gate_games, gate_movetime, gate_threshold, gate_parallel, opening_suite,
+        gpu_count=gpu_count,
     )
 
 
@@ -1643,12 +1898,16 @@ def _play_nnue_selfplay_game(
     multipv: int = 3,
     temperature: float = 1.5,
     random_plies: int = 4,
-) -> list[dict]:
-    """Play one NNUE self-play game with MultiPV + softmax move selection."""
+) -> tuple[list[dict], str, int]:
+    """Play one NNUE self-play game with MultiPV + softmax move selection.
+
+    Returns (samples, result, ply_count) where result is "black"/"white"/"draw".
+    """
     engine.new_game()
     board = make_startpos()
     moves: list[str] = []
     samples: list[dict] = []
+    result = "draw"
 
     for ply in range(MAX_MOVES):
         pos_cmd = "position startpos"
@@ -1666,6 +1925,7 @@ def _play_nnue_selfplay_game(
                     break
                 bestmove, _ = _softmax_select(candidates, temperature=3.0)
             if bestmove in ("resign", "none"):
+                result = "white" if ply % 2 == 0 else "black"
                 break
             try:
                 apply_usi_move(board, bestmove)
@@ -1681,8 +1941,10 @@ def _play_nnue_selfplay_game(
         chosen_move, chosen_cp = _softmax_select(candidates, temperature)
 
         if chosen_move in ("resign", "none"):
+            result = "white" if ply % 2 == 0 else "black"
             break
         if chosen_cp is not None and chosen_cp <= RESIGN_THRESHOLD:
+            result = "white" if ply % 2 == 0 else "black"
             break
 
         bf, wf = extract_features_from_board(board)
@@ -1702,9 +1964,10 @@ def _play_nnue_selfplay_game(
         moves.append(chosen_move)
 
         if detect_repetition(moves):
+            result = "draw"
             break
 
-    return samples
+    return samples, result, len(moves)
 
 
 def _nnue_selfplay_worker(
@@ -1715,6 +1978,7 @@ def _nnue_selfplay_worker(
     movetime: int,
     multipv: int,
     temperature: float,
+    tracker: SelfPlayTracker,
 ) -> list[dict]:
     """Worker: play several NNUE self-play games with a dedicated engine."""
     engine = ArenaEngine(f"nnue_sp_{worker_id}", exe_path, "nnue", dict(options))
@@ -1722,12 +1986,11 @@ def _nnue_selfplay_worker(
     all_samples: list[dict] = []
     try:
         for i, gi in enumerate(game_indices):
-            samples = _play_nnue_selfplay_game(
+            tracker.game_started(worker_id, gi, len(game_indices))
+            samples, result, ply = _play_nnue_selfplay_game(
                 engine, movetime, multipv, temperature)
             all_samples.extend(samples)
-            if (i + 1) % 5 == 0 or i == len(game_indices) - 1:
-                print(f"  [NNUE SP w{worker_id}] {i+1}/{len(game_indices)} games, "
-                      f"{len(all_samples)} samples", file=sys.stderr)
+            tracker.game_done(worker_id, gi, result, ply, len(samples))
     finally:
         engine.quit()
     return all_samples
@@ -1775,28 +2038,30 @@ def self_play_and_train_nnue(
         if start < end:
             chunks.append(list(range(start, end)))
 
-    print(f"  NNUE self-play: {num_games} games, {len(chunks)} workers "
-          f"(hash={hash_per_worker}MB/worker, MultiPV={multipv}, "
-          f"temp={temperature})", file=sys.stderr)
+    tracker = SelfPlayTracker("NNUE", num_games, len(chunks))
+    tracker.start()
 
     all_samples: list[dict] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as executor:
-        futures = {
-            executor.submit(
-                _nnue_selfplay_worker, w, chunk,
-                engine.exe_path, opts, movetime, multipv, temperature,
-            ): w
-            for w, chunk in enumerate(chunks)
-        }
-        for fut in concurrent.futures.as_completed(futures):
-            w = futures[fut]
-            try:
-                samples = fut.result()
-                all_samples.extend(samples)
-                print(f"  NNUE SP worker {w}: {len(samples)} samples",
-                      file=sys.stderr)
-            except Exception as e:
-                print(f"  NNUE SP worker {w} error: {e}", file=sys.stderr)
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+            futures = {
+                executor.submit(
+                    _nnue_selfplay_worker, w, chunk,
+                    engine.exe_path, opts, movetime, multipv, temperature,
+                    tracker,
+                ): w
+                for w, chunk in enumerate(chunks)
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                w = futures[fut]
+                try:
+                    samples = fut.result()
+                    all_samples.extend(samples)
+                except Exception as e:
+                    print(f"  NNUE SP worker {w} error: {e}",
+                          file=sys.stderr)
+    finally:
+        tracker.stop()
 
     if not all_samples:
         print("  NNUE self-play: no samples collected", file=sys.stderr)
@@ -1804,7 +2069,8 @@ def self_play_and_train_nnue(
 
     data_path = str(data_dir / f"selfplay_{iteration:04d}.npz")
     save_nnue_data(all_samples, data_path)
-    print(f"  NNUE self-play: saved {len(all_samples)} samples", file=sys.stderr)
+    print(f"  NNUE self-play: saved {len(all_samples)} samples",
+          file=sys.stderr)
 
     return train_and_gate_nnue(
         work_dir, engine, iteration,
@@ -1847,9 +2113,10 @@ DEFAULT_CONFIG: dict = {
 }
 
 ENGINE_DEFAULTS: dict[str, dict] = {
-    "alpha": {"simulations": 400, "batch_size": 16, "device": "auto"},
-    "nnue": {"hash": 256, "threads": 1},
-    "mcts": {"simulations": 800, "device": "auto"},
+    "alpha": {"simulations": 400, "batch_size": 16, "device": "auto",
+              "selfplay_games": 20},
+    "nnue": {"hash": 256, "threads": 1, "selfplay_games": 200},
+    "mcts": {"simulations": 800, "device": "auto", "selfplay_games": 100},
     "classic": {"threads": 1},
 }
 
@@ -1891,7 +2158,7 @@ def build_engines(cfg: dict) -> dict[str, ArenaEngine]:
                 "Book": "false",
             }
             if ecfg.get("model"):
-                opts["NNModel"] = ecfg["model"]
+                opts["NNModel"] = str(Path(ecfg["model"]).resolve())
             dev = ecfg.get("device", "auto")
             if dev:
                 opts["NNDevice"] = dev
@@ -1904,7 +2171,7 @@ def build_engines(cfg: dict) -> dict[str, ArenaEngine]:
                 "Book": "false",
             }
             if ecfg.get("weights"):
-                opts["NNUEFile"] = ecfg["weights"]
+                opts["NNUEFile"] = str(Path(ecfg["weights"]).resolve())
             engines["nnue"] = ArenaEngine("nnue", exe, "nnue", opts)
 
         elif name == "mcts":
@@ -1913,7 +2180,7 @@ def build_engines(cfg: dict) -> dict[str, ArenaEngine]:
                 "Book": "false",
             }
             if ecfg.get("model"):
-                opts["NNModel"] = ecfg["model"]
+                opts["NNModel"] = str(Path(ecfg["model"]).resolve())
             dev = ecfg.get("device", "auto")
             if dev:
                 opts["NNDevice"] = dev
@@ -2031,12 +2298,18 @@ def main():
             print(f"  WARNING: opening suite not found: {suite_path}", file=sys.stderr)
 
     engine_pools: list[dict[str, ArenaEngine]] = []
+    gpu_slot = 0
     for slot in range(n_parallel):
         slot_engines: dict[str, ArenaEngine] = {}
         for name, tmpl in engines.items():
-            e = ArenaEngine(name, tmpl.exe_path, tmpl.engine_type, dict(tmpl.options))
+            opts = dict(tmpl.options)
+            if gpu_count > 0 and tmpl.engine_type in ("alpha", "mcts"):
+                opts["NNDevice"] = f"cuda:{gpu_slot % gpu_count}"
+            e = ArenaEngine(name, tmpl.exe_path, tmpl.engine_type, opts)
             e.start()
             slot_engines[name] = e
+        if gpu_count > 0:
+            gpu_slot += 1
         engine_pools.append(slot_engines)
 
     alpha_all_positions: list[list[dict]] = []
@@ -2063,10 +2336,10 @@ def main():
     live_ctx = [None]  # mutable ref for nested functions
     completed_games: list[str] = []  # recent results log
     h2h: dict[tuple[str, str], list[int]] = {}
-    for a in engine_names:
-        for b in engine_names:
-            if a != b:
-                h2h[(a, b)] = [0, 0, 0]  # [wins, losses, draws]
+    for na in engine_names:
+        for nb in engine_names:
+            if na != nb:
+                h2h[(na, nb)] = [0, 0, 0]  # [wins, losses, draws]
 
     def _build_display():
         table = Table(title="Arena", show_header=True, expand=True, padding=(0, 1))
@@ -2209,10 +2482,10 @@ def main():
             games_started = 0
             games_done = 0
             pair_game_counts: dict[tuple[str, str], int] = {}
-            for a in engine_names:
-                for b in engine_names:
-                    if a < b:
-                        pair_game_counts[(a, b)] = 0
+            for na in engine_names:
+                for nb in engine_names:
+                    if na < nb:
+                        pair_game_counts[(na, nb)] = 0
             pending: dict[concurrent.futures.Future, tuple[int, int, str, str]] = {}
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=n_parallel)
 
@@ -2369,7 +2642,8 @@ def main():
                 promoted = train_and_gate_alpha(
                     work_dir, engines["alpha"], iteration + 1,
                     g["games"], g["movetime"], g["threshold"],
-                    gate_parallel_gpu, opening_suite)
+                    gate_parallel_gpu, opening_suite,
+                    gpu_count=gpu_count)
                 trained["alpha"] = "promoted" if promoted else "rejected"
 
             if "nnue" in data_saved and "nnue" in engines:
@@ -2385,7 +2659,8 @@ def main():
                 promoted = train_and_gate_mcts(
                     work_dir, engines["mcts"], iteration + 1,
                     g["games"], g["movetime"], g["threshold"],
-                    gate_parallel_gpu, opening_suite)
+                    gate_parallel_gpu, opening_suite,
+                    gpu_count=gpu_count)
                 trained["mcts"] = "promoted" if promoted else "rejected"
 
             if ("classic" in engines
@@ -2411,12 +2686,16 @@ def main():
                     if name in trained:
                         continue
                     eng = engines[name]
+                    ecfg = cfg["engines"].get(name, {})
+                    sp_games = ecfg.get("selfplay_games", sp["games"])
+                    if sp_games <= 0:
+                        continue
                     if eng.engine_type == "alpha":
-                        print(f"  Self-play alpha ({sp['games']} games)...",
+                        print(f"  Self-play alpha ({sp_games} games)...",
                               file=sys.stderr)
                         promoted = self_play_and_train_alpha(
                             work_dir, eng, iteration + 1,
-                            sp["games"],
+                            sp_games, sp["movetime"],
                             g["games"], g["movetime"],
                             g["threshold"], gate_parallel_gpu,
                             opening_suite,
@@ -2424,23 +2703,23 @@ def main():
                             temperature_drop=sp["temperature_drop"])
                         trained["alpha_sp"] = "promoted" if promoted else "rejected"
                     elif eng.engine_type == "mcts":
-                        print(f"  Self-play mcts ({sp['games']} games)...",
+                        print(f"  Self-play mcts ({sp_games} games)...",
                               file=sys.stderr)
                         promoted = self_play_and_train_mcts(
                             work_dir, eng, iteration + 1,
-                            sp["games"], sp["movetime"],
+                            sp_games, sp["movetime"],
                             g["games"], g["movetime"],
                             g["threshold"], gate_parallel_gpu,
                             opening_suite,
                             gpu_count=gpu_count)
                         trained["mcts_sp"] = "promoted" if promoted else "rejected"
                     elif eng.engine_type == "nnue":
-                        print(f"  Self-play nnue ({sp['games']} games, "
+                        print(f"  Self-play nnue ({sp_games} games, "
                               f"MultiPV={sp['multipv']})...",
                               file=sys.stderr)
                         promoted = self_play_and_train_nnue(
                             work_dir, eng, iteration + 1,
-                            sp["games"], sp["movetime"],
+                            sp_games, sp["movetime"],
                             g["games"], g["movetime"],
                             g["threshold"], gate_parallel_cpu,
                             opening_suite,

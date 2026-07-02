@@ -1,0 +1,39 @@
+engines:
+  alpha:
+    exe: build/kishi-to-alpha
+    model: arena_work/alpha/models/best.onnx
+    simulations: 3200
+    batch_size: 32
+    device: "cuda:0"
+  mcts:
+    exe: build/kishi-to
+    model: arena_work/mcts/models/best.onnx
+    simulations: 3200
+    device: "cuda:1"
+  nnue:
+    exe: build/kishi-to-nnue
+    weights: arena_work/nnue/models/best.bin
+    hash: 512
+    threads: 8
+
+arena:
+  iterations: 100
+  games_per_round: 40
+  movetime: 1500
+  parallel: 8
+  opening_suite: opening_suite.txt
+  work_dir: arena_work
+
+gate:
+  games: 10
+  movetime: 500
+
+selfplay:
+  games: 20
+  temperature_drop: 60
+  multipv: 3
+  temperature: 1.5
+
+training:
+  min_positions: 3000
+  intensive: true

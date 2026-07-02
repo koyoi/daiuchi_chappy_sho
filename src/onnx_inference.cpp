@@ -32,6 +32,9 @@ bool OnnxInference::loadModel(const std::string& modelPath, const std::string& d
             try {
                 OrtCUDAProviderOptions cudaOpts{};
                 cudaOpts.device_id = 0;
+                if (device.rfind("cuda:", 0) == 0) {
+                    cudaOpts.device_id = std::stoi(device.substr(5));
+                }
                 opts.AppendExecutionProvider_CUDA(cudaOpts);
                 cudaOk = true;
             } catch (const Ort::Exception& e) {
